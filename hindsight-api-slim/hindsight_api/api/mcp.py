@@ -21,6 +21,7 @@ from hindsight_api.extensions import MCPExtension, load_extension
 from hindsight_api.extensions.tenant import AuthenticationError
 from hindsight_api.mcp_tools import _ALL_TOOLS, MCPToolsConfig, register_mcp_tools
 from hindsight_api.models import RequestContext
+from hindsight_api.recall_defaults import RecallDefaults
 
 # Configure logging from the resolved config (HINDSIGHT_API_LOG_LEVEL).
 _log_level_str = get_config().log_level.lower()
@@ -191,6 +192,10 @@ def create_mcp_server(memory: MemoryEngine, multi_bank: bool = True) -> FastMCP:
         tools=base_tools,
         retain_description=retain_description,
         recall_description=recall_description,
+        recall_defaults=RecallDefaults(
+            types=tuple(global_config.recall_default_types) if global_config.recall_default_types else None,
+            prefer_observations=global_config.recall_default_prefer_observations,
+        ),
     )
 
     register_mcp_tools(mcp, memory, config)

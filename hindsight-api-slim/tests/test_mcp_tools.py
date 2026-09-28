@@ -1196,6 +1196,22 @@ def _make_mcp_server(mock_memory, tools, include_bank_id=True):
     return mcp
 
 
+def _make_recall_server(mock_memory, *, include_bank_id: bool, defaults):
+    from fastmcp import FastMCP
+
+    from hindsight_api.recall_defaults import RecallDefaults
+
+    mcp = FastMCP("test")
+    config = MCPToolsConfig(
+        bank_id_resolver=lambda: "test-bank",
+        include_bank_id_param=include_bank_id,
+        tools={"recall"},
+        recall_defaults=defaults,
+    )
+    register_mcp_tools(mcp, mock_memory, config)
+    return mcp
+
+
 @pytest.mark.asyncio
 class TestRetainNewParams:
     """Tests for new retain parameters: tags, metadata, document_id."""
@@ -1285,6 +1301,34 @@ class TestRecallNewParams:
         await _tools(mcp)["recall"].fn(query="test")
         call_kwargs = mock_memory.recall_async.call_args.kwargs
         assert call_kwargs["fact_type"] == list(VALID_RECALL_FACT_TYPES)
+
+    @pytest.mark.parametrize("include_bank_id", [True, False])
+    async def test_recall_inherits_deployment_defaults(self, mock_memory, include_bank_id):
+        from hindsight_api.recall_defaults import RecallDefaults
+
+        mcp = _make_recall_server(
+            mock_memory,
+            include_bank_id=include_bank_id,
+            defaults=RecallDefaults(types=("observation", "world"), prefer_observations=True),
+        )
+        await _tools(mcp)["recall"].fn(query="test")
+        call_kwargs = mock_memory.recall_async.call_args.kwargs
+        assert call_kwargs["fact_type"] == ["observation", "world"]
+        assert call_kwargs["prefer_observations"] is True
+
+    @pytest.mark.parametrize("include_bank_id", [True, False])
+    async def test_recall_explicit_values_override_deployment_defaults(self, mock_memory, include_bank_id):
+        from hindsight_api.recall_defaults import RecallDefaults
+
+        mcp = _make_recall_server(
+            mock_memory,
+            include_bank_id=include_bank_id,
+            defaults=RecallDefaults(types=("observation", "world"), prefer_observations=True),
+        )
+        await _tools(mcp)["recall"].fn(query="test", types=[], prefer_observations=False)
+        call_kwargs = mock_memory.recall_async.call_args.kwargs
+        assert call_kwargs["fact_type"] == []
+        assert call_kwargs["prefer_observations"] is False
 
     async def test_recall_with_tags(self, mock_memory):
         mcp = _make_mcp_server(mock_memory, {"recall"})

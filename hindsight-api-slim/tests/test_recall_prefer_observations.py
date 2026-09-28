@@ -12,6 +12,7 @@ No LLM required — inserts memory_units directly via SQL with real embeddings.
 """
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -180,17 +181,57 @@ class TestPreferObservations:
 
 
 def test_flag_is_opt_in_by_default():
-    """prefer_observations is opt-in: off at the API surface and the engine method.
+    """The request model preserves omission while the engine default stays off.
 
-    The engine default in particular must stay False so internal callers — notably
-    consolidation, which needs the raw facts it folds into observations — are never
-    silently deduped.
+    The API field is tri-state so a deployment default can apply only when the caller
+    omits it. The engine default in particular must stay False so internal callers —
+    notably consolidation, which needs the raw facts it folds into observations — are
+    never silently deduped.
     """
     import inspect
 
     from hindsight_api.api.http import RecallRequest
     from hindsight_api.engine.memory_engine import MemoryEngine
 
-    assert RecallRequest(query="anything").prefer_observations is False
+    assert RecallRequest(query="anything").prefer_observations is None
+    assert RecallRequest(query="anything", prefer_observations=False).prefer_observations is False
     engine_default = inspect.signature(MemoryEngine.recall_async).parameters["prefer_observations"].default
     assert engine_default is False
+
+
+class TestDeploymentRecallDefaults:
+    def test_upstream_defaults_are_unchanged_without_env(self):
+        from hindsight_api.config import HindsightConfig
+
+        config = HindsightConfig.from_env()
+        assert config.recall_default_types is None
+        assert config.recall_default_prefer_observations is False
+
+    def test_env_overrides_are_parsed(self):
+        from hindsight_api.config import HindsightConfig
+
+        with patch.dict(
+            "os.environ",
+            {
+                "HINDSIGHT_API_RECALL_DEFAULT_TYPES": "observation,world,experience",
+                "HINDSIGHT_API_RECALL_DEFAULT_PREFER_OBSERVATIONS": "true",
+            },
+        ):
+            config = HindsightConfig.from_env()
+
+        assert config.recall_default_types == ["observation", "world", "experience"]
+        assert config.recall_default_prefer_observations is True
+
+    def test_invalid_type_is_rejected(self):
+        from hindsight_api.config import HindsightConfig
+
+        with patch.dict("os.environ", {"HINDSIGHT_API_RECALL_DEFAULT_TYPES": "observation,invalid"}):
+            with pytest.raises(ValueError, match="HINDSIGHT_API_RECALL_DEFAULT_TYPES"):
+                HindsightConfig.from_env()
+
+    def test_resolver_preserves_explicit_false_and_empty_types(self):
+        from hindsight_api.recall_defaults import RecallDefaults, resolve_recall_defaults
+
+        defaults = RecallDefaults(types=("observation", "world"), prefer_observations=True)
+        assert resolve_recall_defaults(None, None, defaults) == (["observation", "world"], True)
+        assert resolve_recall_defaults([], False, defaults) == ([], False)

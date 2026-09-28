@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from ._pg_search import normalize_pg_search_tokenizer
 from ._vector_index import validate_extension
+from .recall_defaults import parse_recall_default_types
 from .utils import mask_network_location
 
 logger = logging.getLogger(__name__)
@@ -681,6 +682,8 @@ ENV_MCP_ENABLED_TOOLS = "HINDSIGHT_API_MCP_ENABLED_TOOLS"
 ENV_MCP_STATELESS = "HINDSIGHT_API_MCP_STATELESS"
 ENV_MCP_INSTRUCTIONS = "HINDSIGHT_API_MCP_INSTRUCTIONS"
 ENV_MCP_AUTH_TOKEN = "HINDSIGHT_API_MCP_AUTH_TOKEN"
+ENV_RECALL_DEFAULT_TYPES = "HINDSIGHT_API_RECALL_DEFAULT_TYPES"
+ENV_RECALL_DEFAULT_PREFER_OBSERVATIONS = "HINDSIGHT_API_RECALL_DEFAULT_PREFER_OBSERVATIONS"
 ENV_ENABLE_BANK_CONFIG_API = "HINDSIGHT_API_ENABLE_BANK_CONFIG_API"
 ENV_ENABLE_BANK_LLM_HEALTH = "HINDSIGHT_API_ENABLE_BANK_LLM_HEALTH"
 ENV_ENABLE_DRY_RUN_EXTRACT = "HINDSIGHT_API_ENABLE_DRY_RUN_EXTRACT"
@@ -1518,6 +1521,8 @@ DEFAULT_MCP_ENABLED = True
 DEFAULT_MCP_ENABLED_TOOLS: list[str] | None = None  # None = all tools enabled
 DEFAULT_MCP_STATELESS = False  # False = stateful (supports SSE/GET); True = stateless (POST-only)
 DEFAULT_MCP_INSTRUCTIONS = None
+DEFAULT_RECALL_DEFAULT_TYPES: list[str] | None = None
+DEFAULT_RECALL_DEFAULT_PREFER_OBSERVATIONS = False
 DEFAULT_ENABLE_BANK_CONFIG_API = True
 # Dry-run extraction is a preview tool that makes a real LLM call but stores nothing. Enabled by
 # default; set HINDSIGHT_API_ENABLE_DRY_RUN_EXTRACT=false to remove the endpoint (e.g. to cap
@@ -3291,6 +3296,12 @@ class HindsightConfig:
     mcp_enabled_tools: list[str] | None  # None = all tools; explicit list = allowlist
     mcp_stateless: bool  # True = stateless HTTP (POST-only); False = stateful (supports GET/SSE)
     mcp_instructions: str | None  # Additional instructions appended to retain/recall MCP tool descriptions
+    # Deployment-level public recall policy. None/False preserve upstream defaults.
+    recall_default_types: list[str] | None = field(default=DEFAULT_RECALL_DEFAULT_TYPES, kw_only=True)
+    recall_default_prefer_observations: bool = field(
+        default=DEFAULT_RECALL_DEFAULT_PREFER_OBSERVATIONS,
+        kw_only=True,
+    )
     enable_bank_config_api: bool
     enable_bank_llm_health: bool
     enable_dry_run_extract: bool
@@ -4794,6 +4805,12 @@ class HindsightConfig:
             else DEFAULT_MCP_ENABLED_TOOLS,
             mcp_stateless=os.getenv(ENV_MCP_STATELESS, str(DEFAULT_MCP_STATELESS)).lower() == "true",
             mcp_instructions=os.getenv(ENV_MCP_INSTRUCTIONS) or DEFAULT_MCP_INSTRUCTIONS,
+            recall_default_types=parse_recall_default_types(os.getenv(ENV_RECALL_DEFAULT_TYPES)),
+            recall_default_prefer_observations=os.getenv(
+                ENV_RECALL_DEFAULT_PREFER_OBSERVATIONS,
+                str(DEFAULT_RECALL_DEFAULT_PREFER_OBSERVATIONS),
+            ).lower()
+            == "true",
             enable_bank_llm_health=os.getenv(ENV_ENABLE_BANK_LLM_HEALTH, str(DEFAULT_ENABLE_BANK_LLM_HEALTH)).lower()
             == "true",
             enable_bank_config_api=os.getenv(ENV_ENABLE_BANK_CONFIG_API, str(DEFAULT_ENABLE_BANK_CONFIG_API)).lower()

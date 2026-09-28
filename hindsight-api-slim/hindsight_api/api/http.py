@@ -68,6 +68,7 @@ from hindsight_api import MemoryEngine
 from hindsight_api.config import RETAIN_EXTRACTION_MODES
 from hindsight_api.config_resolver import BankConfigPersistenceConflictError
 from hindsight_api.engine.retain.entity_labels import LabelGroup, _migrate_label_group
+from hindsight_api.recall_defaults import RecallDefaults, resolve_recall_defaults
 
 
 def _migrate_entity_labels_input(value: Any) -> Any:
@@ -435,14 +436,15 @@ class RecallRequest(BaseModel):
         default=None,
         description="List of fact types to recall: 'world', 'experience', 'observation'. Defaults to all fact types if not specified.",
     )
-    prefer_observations: bool = Field(
-        default=False,
+    prefer_observations: bool | None = Field(
+        default=None,
         description=(
             "When recalling raw facts ('world'/'experience') together with 'observation', drop any raw "
             "fact that an observation in the results was consolidated from, so the observation supersedes "
             "it and you don't get duplicate content. The freed slots are backfilled with the next results, "
-            "keeping the result count at the requested budget. Disabled by default; set to true to enable. "
-            "No effect unless 'observation' and at least one raw type are both requested."
+            "keeping the result count at the requested budget. Omit to use the deployment default; set "
+            "explicitly to true or false to override it. No effect unless 'observation' and at least one "
+            "raw type are both requested."
         ),
     )
     budget: Budget = Budget.MID
@@ -6035,8 +6037,16 @@ def _register_routes(app: FastAPI):
                 )
 
         try:
-            # Default to all fact types if not specified
-            fact_types = request.types if request.types else list(VALID_RECALL_FACT_TYPES)
+            config = get_config()
+            resolved_types, resolved_prefer = resolve_recall_defaults(
+                request.types,
+                request.prefer_observations,
+                RecallDefaults(
+                    types=tuple(config.recall_default_types) if config.recall_default_types else None,
+                    prefer_observations=config.recall_default_prefer_observations,
+                ),
+            )
+            fact_types = resolved_types if resolved_types else list(VALID_RECALL_FACT_TYPES)
 
             # Parse query_timestamp if provided
             question_date = None
@@ -6083,7 +6093,7 @@ def _register_routes(app: FastAPI):
                         max_tokens=request.max_tokens,
                         enable_trace=request.trace,
                         fact_type=fact_types,
-                        prefer_observations=request.prefer_observations,
+                        prefer_observations=resolved_prefer,
                         question_date=question_date,
                         include_entities=include_entities,
                         max_entity_tokens=max_entity_tokens,

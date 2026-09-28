@@ -28,6 +28,7 @@ from hindsight_api.engine.response_models import VALID_RECALL_FACT_TYPES, MinSco
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
 from hindsight_api.extensions import OperationValidationError
 from hindsight_api.models import RequestContext
+from hindsight_api.recall_defaults import RecallDefaults, resolve_recall_defaults
 
 _TAG_GROUP_LIST_ADAPTER = TypeAdapter(list[TagGroup])
 
@@ -309,6 +310,9 @@ class MCPToolsConfig:
     # Custom descriptions (if None, uses defaults)
     retain_description: str | None = None
     recall_description: str | None = None
+
+    # Deployment policy used only when a public recall request omits a field.
+    recall_defaults: RecallDefaults = RecallDefaults()
 
     # How to resolve the allowlisted passthrough headers (set by MCP middleware).
     # Appended last so existing positional construction keeps its meaning.
@@ -1245,7 +1249,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
             max_tokens: int = 4096,
             budget: str = "high",
             types: list[str] | None = None,
-            prefer_observations: bool = False,
+            prefer_observations: bool | None = None,
             tags: list[str] | None = None,
             tags_match: str = "any",
             tag_groups: list[dict] | None = None,
@@ -1262,8 +1266,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 types: Fact types to include (e.g., ['world', 'experience']). Default: all types.
                 prefer_observations: When recalling raw facts together with 'observation', drop any raw fact
                     that a returned observation was consolidated from, so the observation supersedes it (no
-                    duplicate content). Disabled by default; set true to enable. No effect unless
-                    'observation' and a raw type are both in types. Default: False.
+                    duplicate content). Omit to use the deployment default; set explicitly to true or
+                    false to override it. No effect unless 'observation' and a raw type are both in types.
                 tags: Optional tags to filter results by (e.g., ['project:alpha']). Mutually exclusive with tag_groups.
                 tags_match: How to match tags - 'any' (match any tag) or 'all' (match all tags). Default: 'any'
                 tag_groups: Compound tag filter using boolean groups (AND-ed together). Each group is a leaf
@@ -1301,13 +1305,18 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
 
                 budget_map = {"low": Budget.LOW, "mid": Budget.MID, "high": Budget.HIGH}
                 budget_enum = budget_map.get(budget.lower(), Budget.HIGH)
-                fact_types = types if types is not None else list(VALID_RECALL_FACT_TYPES)
+                resolved_types, resolved_prefer = resolve_recall_defaults(
+                    types,
+                    prefer_observations,
+                    config.recall_defaults,
+                )
+                fact_types = resolved_types if resolved_types is not None else list(VALID_RECALL_FACT_TYPES)
 
                 recall_kwargs: dict[str, Any] = {
                     "bank_id": target_bank,
                     "query": query,
                     "fact_type": fact_types,
-                    "prefer_observations": prefer_observations,
+                    "prefer_observations": resolved_prefer,
                     "budget": budget_enum,
                     "max_tokens": max_tokens,
                     "request_context": _get_request_context(config),
@@ -1344,7 +1353,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
             max_tokens: int = 4096,
             budget: str = "high",
             types: list[str] | None = None,
-            prefer_observations: bool = False,
+            prefer_observations: bool | None = None,
             tags: list[str] | None = None,
             tags_match: str = "any",
             tag_groups: list[dict] | None = None,
@@ -1360,8 +1369,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 types: Fact types to include (e.g., ['world', 'experience']). Default: all types.
                 prefer_observations: When recalling raw facts together with 'observation', drop any raw fact
                     that a returned observation was consolidated from, so the observation supersedes it (no
-                    duplicate content). Disabled by default; set true to enable. No effect unless
-                    'observation' and a raw type are both in types. Default: False.
+                    duplicate content). Omit to use the deployment default; set explicitly to true or
+                    false to override it. No effect unless 'observation' and a raw type are both in types.
                 tags: Optional tags to filter results by (e.g., ['project:alpha']). Mutually exclusive with tag_groups.
                 tags_match: How to match tags - 'any' (match any tag) or 'all' (match all tags). Default: 'any'
                 tag_groups: Compound tag filter using boolean groups (AND-ed together). Each group is a leaf
@@ -1398,13 +1407,18 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
 
                 budget_map = {"low": Budget.LOW, "mid": Budget.MID, "high": Budget.HIGH}
                 budget_enum = budget_map.get(budget.lower(), Budget.HIGH)
-                fact_types = types if types is not None else list(VALID_RECALL_FACT_TYPES)
+                resolved_types, resolved_prefer = resolve_recall_defaults(
+                    types,
+                    prefer_observations,
+                    config.recall_defaults,
+                )
+                fact_types = resolved_types if resolved_types is not None else list(VALID_RECALL_FACT_TYPES)
 
                 recall_kwargs: dict[str, Any] = {
                     "bank_id": target_bank,
                     "query": query,
                     "fact_type": fact_types,
-                    "prefer_observations": prefer_observations,
+                    "prefer_observations": resolved_prefer,
                     "budget": budget_enum,
                     "max_tokens": max_tokens,
                     "request_context": _get_request_context(config),
