@@ -8,5 +8,8 @@ export const routing = defineRouting({
   // NEXT_LOCALE cookie (Accept-Language as fallback) and next-intl rewrites
   // internally to the [locale] segment, so paths stay clean (/banks/x, never
   // /es/banks/x). Keeps the control plane locale-agnostic in the address bar.
+  //
+  // The second middleware pass on the rewritten path is short-circuited in
+  // middleware.ts — see the comment there.
   localePrefix: "never",
 });

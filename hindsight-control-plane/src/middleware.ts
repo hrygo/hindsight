@@ -6,6 +6,7 @@ import createIntlMiddleware from "next-intl/middleware";
 import { ACCESS_KEY_COOKIE, verifySessionToken } from "@/lib/auth/session";
 import { stripBasePath, withBasePath } from "@/lib/base-path";
 import { routing } from "@/i18n/routing";
+import { locales } from "@/i18n/config";
 
 // Routes that don't require authentication
 const PUBLIC_PATTERNS = [
@@ -22,10 +23,28 @@ const PUBLIC_PATTERNS = [
 
 const intlMiddleware = createIntlMiddleware(routing);
 
+const LOCALE_PREFIX = new RegExp(`^/(?:${locales.join("|")})(?=/|$)`);
+
+/**
+ * Strip a leading locale segment from an app pathname.
+ *
+ * `routing.localePrefix` is "never", so the locale never appears in the URL —
+ * but next-intl still rewrites `/login` to `/en/login` internally, and the
+ * middleware runs again on that rewritten path. `stripBasePath` only knows
+ * about `basePath`, so without this the public-route check sees `/en/login`,
+ * fails `startsWith("/login")`, and bounces the browser back to
+ * `/login?returnTo=/en/login` forever.
+ */
+function stripLocalePrefix(pathname: string): string {
+  const stripped = pathname.replace(LOCALE_PREFIX, "");
+  return stripped || "/";
+}
+
 export async function middleware(request: NextRequest) {
   const accessKey = process.env.HINDSIGHT_CP_ACCESS_KEY;
   const { pathname } = request.nextUrl;
-  const appPathname = stripBasePath(pathname);
+  const appPathname = stripLocalePrefix(stripBasePath(pathname));
+  const onRewrittenPass = LOCALE_PREFIX.test(pathname);
 
   // API routes are not locale-prefixed — handle auth directly without i18n routing.
   if (appPathname.startsWith("/api/")) {
@@ -75,7 +94,14 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  return intlMiddleware(request);
+  // `localePrefix: "never"` still rewrites `/login` to `/en/login`, and the
+  // middleware runs a second time on that rewritten path. Calling the intl
+  // middleware again there is wrong: next-intl sees a locale-prefixed path it
+  // would have to strip, answers 307 back to `/login`, and the browser bounces
+  // between the two forever (ERR_TOO_MANY_REDIRECTS). The rewrite already
+  // happened on the first pass, so the second one just lets the request
+  // through. The auth check above still runs, with the locale stripped.
+  return onRewrittenPass ? NextResponse.next() : intlMiddleware(request);
 }
 
 export const config = {
