@@ -71,17 +71,29 @@ describe("npmViewVersion", () => {
       };
     });
 
-  it("asks npm for the version — the same resolver npx will install through", async () => {
+  it("asks npm for the latest version — the same resolver npx will install through", async () => {
     const spawn = npmSpawn(0, '"0.6.1"\n');
     expect(await npmViewVersion("@vectorize-io/hindsight-coding-agents", asRealSpawn(spawn))).toBe(
       "0.6.1"
     );
     const [bin, args, opts] = spawn.mock.calls[0];
     expect(bin).toBe("npm");
-    // --json, so the version arrives as a quoted string on stdout rather than npm's human
-    // output; a timeout bounds it (the NPM_VIEW_TIMEOUT_MS contract).
-    expect(args).toEqual(["view", "@vectorize-io/hindsight-coding-agents", "version", "--json"]);
+    // The explicit dist-tag keeps the lookup on the published release channel even if the
+    // user's default npm tag is not `latest`; a timeout bounds it (NPM_VIEW_TIMEOUT_MS).
+    expect(args).toEqual([
+      "view",
+      "@vectorize-io/hindsight-coding-agents@latest",
+      "version",
+      "--json",
+    ]);
     expect(opts.timeout).toBe(5000);
+  });
+
+  it("accepts npm 12's single-element JSON array for one resolved version", async () => {
+    // npm 12's view command returns ["0.8.0"] even for one field and one matching version.
+    // This output is valid and unambiguous, so rejecting it disables the whole update chain.
+    const spawn = npmSpawn(0, '["0.8.0"]\n');
+    expect(await npmViewVersion("@x/y", asRealSpawn(spawn))).toBe("0.8.0");
   });
 
   it("reads a failure as no-version, never as an exception", async () => {
@@ -95,6 +107,13 @@ describe("npmViewVersion", () => {
     expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, "not json")))).toBe("");
     // …JSON, but not a single version string…
     expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, '["0.6.1", "0.6.0"]')))).toBe("");
+    expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, "[]")))).toBe("");
+    expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, "[[\"0.6.1\"]]")))).toBe("");
+    expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, '{"version":"0.6.1"}')))).toBe(
+      ""
+    );
+    expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, "null")))).toBe("");
+    expect(await npmViewVersion("@x/y", asRealSpawn(npmSpawn(0, "[null]")))).toBe("");
     // …a "version" carrying shell metacharacters — the whitelist is what stops it, not
     // isNewer: parseInt("3 && calc") is 3, so isNewer("1.2.3 && calc", "1.0.0") is true. The
     // value is headed for an argv entry now and a command line once a Windows shell wrapper

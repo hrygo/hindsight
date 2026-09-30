@@ -290,7 +290,10 @@ export async function npmViewVersion(
       resolve(v);
     };
     try {
-      const child = spawnImpl("npm", ["view", pkg, "version", "--json"], {
+      // The explicit dist-tag keeps the lookup on the published release channel even if
+      // the user's default npm tag is not `latest`. Both this and the later npx resolve
+      // through the same npm config, mirror and project .npmrc.
+      const child = spawnImpl("npm", ["view", `${pkg}@latest`, "version", "--json"], {
         timeout: NPM_VIEW_TIMEOUT_MS,
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
@@ -307,9 +310,19 @@ export async function npmViewVersion(
       child.on("close", (code, signal) => {
         if (code !== 0) return done("", `npm view exited ${code ?? signal}`);
         try {
-          const v = JSON.parse(out.trim()) as unknown;
-          // --json on one field is a quoted string; anything else is not a version to pin.
-          if (typeof v !== "string")
+          const parsed = JSON.parse(out.trim()) as unknown;
+          // npm 6-11 print a quoted string for one resolved field; npm 12 prints a
+          // single-element array. Both are unambiguous. Anything else — no match,
+          // several versions, an object — is not a version to pin.
+          const v =
+            typeof parsed === "string"
+              ? parsed
+              : Array.isArray(parsed) &&
+                  parsed.length === 1 &&
+                  typeof parsed[0] === "string"
+                ? parsed[0]
+                : undefined;
+          if (v === undefined)
             return done("", `unparsable npm output: ${out.trim().slice(0, 80)}`);
           // Whitelist: the value reaches a spawn argv, and isNewer("1.2.3 && calc", ...) is true.
           if (!RELEASE_RE.test(v)) return done("", `not a release: ${v.slice(0, 40)}`);
