@@ -17,6 +17,15 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+describe("buildSystemInjection", () => {
+  it("does not promise permanent correction precedence in automatically injected memory", () => {
+    const out = buildSystemInjection("a fact");
+    expect(out).toContain("does not guarantee permanent precedence");
+    expect(out).toContain("re-query and verify");
+    expect(out).not.toContain("newer fact supersedes the stale one");
+  });
+});
+
 describe("readClaudeTranscript", () => {
   it("captures text + compact action turns, dropping tool_result/non-message/isMeta/isSidechain/thinking/empty lines and tolerating malformed or non-object JSON lines", () => {
     const lines = [

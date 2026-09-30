@@ -49,6 +49,13 @@ describe("buildKnowledgeTools", () => {
     expect(tools[0].name).toBe("hindsight_sync_status");
   });
 
+  it("does not promise that an ingested correction permanently outranks stale memory", () => {
+    const tool = findTool(buildKnowledgeTools(stubClient(), "repo-a"), "hindsight_ingest_document");
+    expect(tool.description).not.toMatch(/newer fact supersedes the stale one/i);
+    expect(tool.description).toMatch(/does not guarantee/i);
+    expect(tool.description).toMatch(/verify/i);
+  });
+
   it("does not expose the removed raw page-CRUD tools", () => {
     const client = stubClient();
     const names = buildKnowledgeTools(client, "repo-a").map((t) => t.name);

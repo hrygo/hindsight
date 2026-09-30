@@ -105,7 +105,8 @@ export function buildSystemInjection(memory: string): string {
     "If you VERIFY this memory is wrong or outdated (the code or facts contradict it), CORRECT " +
     "the record: call hindsight_ingest_document with a short correction titled " +
     '"Correction: <topic>" stating (1) what memory claimed, (2) what is actually true now, and ' +
-    "(3) the evidence you verified — the newer fact supersedes the stale one in future retrieval.\n\n" +
+    "(3) the evidence you verified. The correction does not guarantee permanent precedence over " +
+    "older memory; re-query and verify against the current authoritative source.\n\n" +
     memory +
     "\n</hindsight_memory>"
   );

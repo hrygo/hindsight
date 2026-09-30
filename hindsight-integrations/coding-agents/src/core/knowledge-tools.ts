@@ -338,7 +338,8 @@ export function buildKnowledgeTools(
         "(that's captured automatically at session end). This is ALSO the correction mechanism: " +
         "when you verify that a retrieved memory is wrong or outdated, ingest a document titled " +
         "'Correction: <topic>' stating what memory claimed, what is actually true, and the " +
-        "evidence — the newer fact supersedes the stale one in future retrieval.",
+        "evidence. This does not guarantee permanent precedence over older memory; re-query and " +
+        "verify against the current authoritative source.",
       inputSchema: { title: z.string(), content: z.string() },
       annotations: NON_DESTRUCTIVE_WRITE_ANNOTATIONS,
       handler: guarded(async ({ title, content }) => {
