@@ -385,6 +385,15 @@ describe("environment fallback", () => {
     expect(cfg.apiToken).toBe("tok-from-file");
   });
 
+  it("companionSkill defaults to auto and only an explicit never turns it off", () => {
+    expect(resolveConfig({}).companionSkill).toBe("auto");
+    expect(resolveConfig({ companionSkill: "auto" }).companionSkill).toBe("auto");
+    expect(resolveConfig({ companionSkill: "never" }).companionSkill).toBe("never");
+    // A typo must not silently disable the user's skill on disk.
+    expect(resolveConfig({ companionSkill: "off" as never }).companionSkill).toBe("auto");
+    expect(resolveConfig({ companionSkill: "" as never }).companionSkill).toBe("auto");
+  });
+
   it("autoInject: explicit mode wins, legacy autoReflect=false maps to none, junk falls back", () => {
     expect(resolveConfig({}).autoInject).toBe("reflect");
     expect(resolveConfig({ autoInject: "pages" }).autoInject).toBe("pages");

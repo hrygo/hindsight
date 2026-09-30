@@ -379,7 +379,8 @@ export async function runSessionStartHook(
 
     let cfg = loadConfig({ harness });
     setLogLevel(cfg.logLevel);
-    syncCompanionSkill(harness); // keep the installed skill current with the package version
+    // keep the installed skill current with the package version
+    if (cfg.companionSkill !== "never") syncCompanionSkill(harness);
     if (cfg.disabled) return;
     // …and keep the package itself current. AFTER the disabled check, unlike the skill sync above:
     // `disabled` means an inert plugin, and a network call plus a background npm install is not

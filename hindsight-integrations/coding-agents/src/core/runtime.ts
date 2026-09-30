@@ -121,7 +121,9 @@ export class RuntimeCore {
     // (`dsh plugin add …`, `cline plugin install`), a route our installer never sees, leaving the
     // plugin loaded with its tools registered and no skill on disk at all (#4406). No-op for a host
     // with no skills directory (opencode; opencode2 registers it in memory instead).
-    syncCompanionSkill(this.harness, { install: true });
+    if (this.cfg.companionSkill !== "never") {
+      syncCompanionSkill(this.harness, { install: true });
+    }
     // Daemon mode: this is the SessionStart of a persistent-plugin host, so it owns the same
     // warm-up the hook harnesses do in `runSessionStartHook` — start it before the user has typed
     // anything, wait only briefly, and let a cold one keep coming up in the background. Without it

@@ -21,8 +21,9 @@ explains what happens automatically, which tools you have, and how to configure 
   conversations) and keeps 5 knowledge pages current. There is NO ingest command to run.
 - **Session synthesis**: by default, the first prompt of a session triggers one deep memory
   synthesis (`reflect`) injected into context. `autoInject` switches the source: `pages` (knowledge
-  page search hits), `recall` (recalled observations), or `none` (nothing injected; the agent
-  searches the knowledge pages first and reflects only when they are too shallow).
+  page search hits), `recall` (recalled observations), or `none` (nothing injected; when a task
+  depends on this repository's past decisions, the agent searches the relevant knowledge pages
+  first and reflects only when they are too shallow).
 - **Write-back**: the session transcript is retained into the bank automatically at session end
   (per-turn on opencode). The user never needs to "save" a conversation.
 
@@ -41,9 +42,12 @@ When the user says "store this in hindsight" / "remember this":
 
 ## Retrieving
 
-- `hindsight_search_knowledge_pages(query)` — FIRST STOP for project questions (components,
-  conventions, past decisions, initiatives). Server-side hybrid search, fast.
-- `hindsight_read_knowledge_page(page_id)` / `hindsight_list_knowledge_pages` — read pages fully.
+- When a task depends on this repository's past decisions, conventions, or initiatives, call
+  `hindsight_search_knowledge_pages(query)` first. Server-side hybrid search, fast.
+- Skip memory retrieval for self-contained translation, rewriting, formatting, and one-step tasks
+  whose required facts are already supplied.
+- `hindsight_read_knowledge_page(page_id)` / `hindsight_list_knowledge_pages` — read the relevant
+  pages in full when search results need deeper context.
 - `hindsight_reflect(query)` — deep reasoning over the whole memory for WHY questions and exact
   decided values; slower (seconds), use deliberately.
 - Credit visibly whenever memory informs an answer: start that part with
@@ -59,9 +63,10 @@ source contradicts it), FIX THE RECORD — don't just ignore it. Call
 - **content**: (1) what memory claimed, (2) what is verifiably true now, (3) the evidence you
   checked (file/commit/output). Quote exact values verbatim.
 
-Newer facts supersede older ones in retrieval, so one clear correction permanently outranks the
-stale memory. Do this whenever you catch a wrong injected memory, a stale knowledge-page claim, or
-an outdated decision — silent disregard leaves the trap armed for the next session.
+If the corrected content is already managed by a document synchronizer, change the source file first
+and ingest one precise correction only when the memory layer still needs it. The correction does not
+guarantee permanent precedence over older memory: re-query and verify against the current
+authoritative source. Silent disregard leaves the trap armed for the next session.
 
 ## Install / update
 
@@ -232,6 +237,7 @@ hook by Codex...), so one shared config serves several agents side by side:
 | `surveyBudgetUsd`       | `2`                                  | survey spend cap — Claude recipe only (`claude -p --max-budget-usd`); other agents rely on their read-only sandbox                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `surveyRefreshCommits`  | `20`                                 | re-run the survey at SessionStart once this many commits have accrued since the last one, so the structural pages track an architecture that keeps moving (`0` = survey a cold repo only, never again)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `retainSessions`        | `true`                               | session write-back, honored by every harness: hook harnesses write the transcript on Stop, Factory Droid also writes on its cancellation notification, and plugin harnesses (opencode, opencode 2, Kilo) upsert it every turn plus an idle flush that captures the reply the per-turn pass can't see. Set `false` - globally, per harness, or per bank - to stop writing transcripts (the background history import stops with it) while recall, git ingest and the memory tools keep working                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `companionSkill`        | `auto`  | whether the packaged companion skill may be written into this host's skills directory. `auto` keeps upstream behaviour: persistent-plugin hosts install it, hook harnesses refresh an existing copy. Set `never` on a machine whose agent instructions come from a locally maintained skill, so the packaged copy does not become a second, silently drifting instruction source |
 | `maxParallelRetains`    | `10`                                 | cap on concurrent retain-related requests: drain()'s per-op polls plus deepen's chat/git retain pools. The API rate-limits bursts, not single requests — if you see 429s, lower this rather than raising it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `logLevel`              | `"info"`                             | plugin-log verbosity (`"debug"` \| `"info"` \| `"warn"` \| `"error"`); `HINDSIGHT_LOG_LEVEL` env overrides                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `autoUpdate`            | `true`                               | keep the installed runtime current by itself: once a day a session start asks npm for the published version and, when it is newer, re-stages `~/.hindsight/coding-agents` in the background. It rewires no host config, so a release adding a **new** hook entry point still needs a manual `install`. Set `false` to pin the installed version; `disabled` stops it too, since an inert plugin should stay inert. Only ever replaces a runtime installed the documented way, via `npx` — a copy installed with `npm i -g`, vendored as a project dependency, or built from a checkout is left to whoever manages it (update those the way you installed them), and it needs `npx` and `npm` on `PATH`                                                                                                                                                                                                          |

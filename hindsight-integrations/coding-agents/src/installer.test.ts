@@ -671,6 +671,22 @@ describe("zcode installer", () => {
     expect(existsSync(join(ctx.home, ".agents", "skills", "hindsight-coding-agent"))).toBe(false);
   });
 
+  it("installs no companion skill when the user turned it off in coding-agent.json", () => {
+    // The runtime and the session-start hook both honour companionSkill=never; `install` must
+    // not be the one path that quietly puts the copy back.
+    const ctx = ctxWithPackagedSkill();
+    writeJsonAt(join(ctx.home, ".hindsight", "coding-agent.json"), { companionSkill: "never" });
+    expect(run(["install", "zcode"], ctx)).toBe(0);
+    expect(existsSync(join(ctx.home, ...SKILL_DIRS.zcode, "hindsight-coding-agent"))).toBe(false);
+    // A near-miss value is not a decision to disable: only the explicit "never" turns it off.
+    const other = ctxWithPackagedSkill();
+    writeJsonAt(join(other.home, ".hindsight", "coding-agent.json"), { companionSkill: "off" });
+    expect(run(["install", "zcode"], other)).toBe(0);
+    expect(existsSync(join(other.home, ...SKILL_DIRS.zcode, "hindsight-coding-agent", "SKILL.md"))).toBe(
+      true
+    );
+  });
+
   it("uninstall takes the skill back out of ZCode's root", () => {
     const ctx = ctxWithPackagedSkill();
     expect(run(["install", "zcode"], ctx)).toBe(0);

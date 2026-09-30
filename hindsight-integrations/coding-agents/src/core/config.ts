@@ -98,6 +98,14 @@ export interface RawConfig {
    *  cadence alike. Gates ONLY the transcript — recall, git ingest, seeding and the memory
    *  tools keep working (that is `disabled`'s job). */
   retainSessions?: boolean;
+  /**
+   * Whether the packaged companion skill may be written into the host's skills
+   * directory. "auto" (default) keeps upstream behaviour: persistent-plugin hosts
+   * install it, hook harnesses refresh an existing copy. "never" suppresses both —
+   * for a machine whose agent instructions come from a locally maintained skill,
+   * where a second copy on disk is a second, silently drifting instruction source.
+   */
+  companionSkill?: "auto" | "never";
   /** Cap on concurrent retain-related requests the client sends to the API (default 10):
    *  drain()'s per-operation polls and deepen's chat/git retain pools. A single request returning
    *  200 while bursts get 429s means the server is rate-limiting concurrency, not total volume —
@@ -323,6 +331,7 @@ export interface Config {
   harness: string;
   disabled: boolean;
   retainSessions: boolean;
+  companionSkill: "auto" | "never";
   maxParallelRetains: number;
   reflectTimeoutMs: number;
   reflectToolTimeoutMs: number;
@@ -620,6 +629,8 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     harness: raw.harness ?? "opencode",
     disabled: raw.disabled ?? false,
     retainSessions: raw.retainSessions ?? true, // write sessions back by default, every harness
+    // anything but an explicit "never" keeps the packaged behaviour
+    companionSkill: raw.companionSkill === "never" ? "never" : "auto",
     manageBankConfig: raw.manageBankConfig ?? true,
     retainExtractionMode: RETAIN_EXTRACTION_MODES.includes(raw.retainExtractionMode!)
       ? raw.retainExtractionMode!
@@ -772,6 +783,7 @@ const ENV_KEYS = {
   harness: "HINDSIGHT_HARNESS",
   disabled: "HINDSIGHT_DISABLED",
   retainSessions: "HINDSIGHT_RETAIN_SESSIONS",
+  companionSkill: "HINDSIGHT_COMPANION_SKILL",
   maxParallelRetains: "HINDSIGHT_MAX_PARALLEL_RETAINS",
   reflectTimeoutMs: "HINDSIGHT_REFLECT_TIMEOUT_MS",
   reflectToolTimeoutMs: "HINDSIGHT_REFLECT_TOOL_TIMEOUT_MS",

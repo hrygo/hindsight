@@ -14,7 +14,33 @@ vi.mock("./daemon", async (importOriginal) => ({
   ensureDaemon: daemonSpy,
 }));
 
+// The packaged skill is written into the USER's skills directory on plugin load.
+// Spying keeps this suite from touching the real ~/.agents/skills, and makes the
+// companionSkill switch observable instead of merely asserted.
+const skillSpy = vi.hoisted(() => vi.fn());
+vi.mock("./skill-sync", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./skill-sync")>()),
+  syncCompanionSkill: skillSpy,
+}));
+
 describe("RuntimeCore", () => {
+  it("installs the companion skill by default and installs nothing when it is turned off", async () => {
+    const client = {
+      listDocumentIds: vi.fn(async () => new Set<string>()),
+      listPages: vi.fn(async () => ({ items: [] })),
+      reflect: vi.fn(async () => ""),
+    } as unknown as HindsightClient;
+
+    await new RuntimeCore(client, "bank-1", resolveConfig({})).seedIfCold(undefined);
+    expect(skillSpy).toHaveBeenCalledTimes(1);
+    expect(skillSpy.mock.calls[0][1]).toMatchObject({ install: true });
+
+    skillSpy.mockClear();
+    await new RuntimeCore(client, "bank-1", resolveConfig({ companionSkill: "never" }))
+      .seedIfCold(undefined);
+    expect(skillSpy).not.toHaveBeenCalled();
+  });
+
   it("uses the shared prompt lifecycle and consumes the new-bank reflect deferral once", async () => {
     const client = {
       listDocumentIds: vi.fn(async () => new Set(["git:existing"])),

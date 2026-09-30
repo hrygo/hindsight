@@ -311,7 +311,25 @@ function skillsBaseFor(c: InstallCtx, harness: string): string {
  * The log line carries the harness prefix like every adapter message: several adapters install
  * the skill before their first own log, and an unprefixed line would render under the PREVIOUS
  * harness's group in the CLI output. */
+/** Has the user turned the packaged companion skill off? Read from the same config file the
+ *  runtime reads, so `install` cannot undo what the sessions were told to respect. A missing or
+ *  unreadable config keeps upstream behaviour. */
+function companionSkillDisabled(c: InstallCtx): boolean {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(c.home, ".hindsight", "coding-agent.json"), "utf8")
+    );
+    return raw?.companionSkill === "never";
+  } catch {
+    return false;
+  }
+}
+
 function installSkill(c: InstallCtx, harness: string): void {
+  if (companionSkillDisabled(c)) {
+    c.log?.(`${harness}: companion skill skipped (companionSkill=never)`);
+    return;
+  }
   const src = join(c.pkgRoot, "skill");
   if (!existsSync(join(src, "SKILL.md"))) return;
   const skillsBase = skillsBaseFor(c, harness);
