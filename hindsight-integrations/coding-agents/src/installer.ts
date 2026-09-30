@@ -45,6 +45,7 @@ import { HOOK_HARNESSES, type HookHarnessName } from "./harness/hook-lifecycle";
 import { importLocalHistory } from "./core/history";
 import { detectLlm, hasRustToolchain, hasUvx, type LlmChoice } from "./core/daemon";
 import { readLegacyEndpoint } from "./core/legacy";
+import { readEnvConfig } from "./core/config";
 import { isOurMcpEntry } from "./core/util";
 import { SKILL_DIRS, resolveSkillDirs, traecodeDotDirName } from "./core/skill-dirs";
 import {
@@ -315,14 +316,20 @@ function skillsBaseFor(c: InstallCtx, harness: string): string {
  *  runtime reads, so `install` cannot undo what the sessions were told to respect. A missing or
  *  unreadable config keeps upstream behaviour. */
 function companionSkillDisabled(c: InstallCtx): boolean {
+  let fromFile: unknown;
   try {
-    const raw = JSON.parse(
+    fromFile = JSON.parse(
       readFileSync(join(c.home, ".hindsight", "coding-agent.json"), "utf8")
-    );
-    return raw?.companionSkill === "never";
+    )?.companionSkill;
   } catch {
-    return false;
+    // Missing or unreadable: fall through to the env layer rather than reading as "not disabled".
+    fromFile = undefined;
   }
+  // core/config.ts layers defaults → env → file → harnesses.<name>, so the FILE wins and the env
+  // var is only a fallback. readEnvConfig applies the same "unset or empty contributes nothing"
+  // rule, and a value that is present but not the exact string "never" normalizes to enabled on
+  // both sides — `install` must never disagree with the sessions about the same switch.
+  return (fromFile ?? readEnvConfig().companionSkill) === "never";
 }
 
 function installSkill(c: InstallCtx, harness: string): void {

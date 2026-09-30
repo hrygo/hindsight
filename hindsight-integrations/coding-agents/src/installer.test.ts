@@ -102,6 +102,9 @@ function writeJsonAt(path: string, value: unknown): void {
 beforeEach(() => {
   vi.stubEnv("HINDSIGHT_CONFIG", "");
   vi.stubEnv("DSH_HOME", "");
+  // installSkill() reads the env fallback layer for companionSkill, so a shell that exports it
+  // would silently disable the skill in every test here that asserts it IS installed.
+  vi.stubEnv("HINDSIGHT_COMPANION_SKILL", "");
   delete process.env.DSH_HOME;
 });
 
@@ -683,6 +686,34 @@ describe("zcode installer", () => {
     writeJsonAt(join(other.home, ".hindsight", "coding-agent.json"), { companionSkill: "off" });
     expect(run(["install", "zcode"], other)).toBe(0);
     expect(existsSync(join(other.home, ...SKILL_DIRS.zcode, "hindsight-coding-agent", "SKILL.md"))).toBe(
+      true
+    );
+  });
+
+  it("honours the companion skill env fallback, with the config file still winning", () => {
+    // core/config.ts layers defaults → env → file → harnesses.<name>: the env var is a FALLBACK,
+    // not an override. installSkill() has to read the same two layers or `install` reinstalls a
+    // copy that every session then refuses to use (or the reverse, which is worse to debug).
+    const envOnly = ctxWithPackagedSkill();
+    vi.stubEnv("HINDSIGHT_COMPANION_SKILL", "never");
+    expect(run(["install", "zcode"], envOnly)).toBe(0);
+    expect(existsSync(join(envOnly.home, ...SKILL_DIRS.zcode, "hindsight-coding-agent"))).toBe(false);
+
+    // The file's own value wins over the env layer, including when it does not disable: a user who
+    // turned it off in one place and on in the other gets the file, which is what the runtime does.
+    const fileWins = ctxWithPackagedSkill();
+    writeJsonAt(join(fileWins.home, ".hindsight", "coding-agent.json"), { companionSkill: "auto" });
+    expect(run(["install", "zcode"], fileWins)).toBe(0);
+    expect(
+      existsSync(join(fileWins.home, ...SKILL_DIRS.zcode, "hindsight-coding-agent", "SKILL.md"))
+    ).toBe(true);
+
+    // An empty env var is not a decision (readEnvConfig drops unset/empty so it cannot mask the
+    // file), so the copy comes back.
+    const empty = ctxWithPackagedSkill();
+    vi.stubEnv("HINDSIGHT_COMPANION_SKILL", "");
+    expect(run(["install", "zcode"], empty)).toBe(0);
+    expect(existsSync(join(empty.home, ...SKILL_DIRS.zcode, "hindsight-coding-agent", "SKILL.md"))).toBe(
       true
     );
   });
