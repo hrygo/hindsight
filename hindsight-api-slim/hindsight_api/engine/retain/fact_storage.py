@@ -183,7 +183,9 @@ async def delete_stale_observations_for_memories(
         ops=ops,
         fq_table=fq_table,
         bank_id=bank_id,
-        fact_ids=fact_ids,
+        # The seam declares `list`; this function now takes a Sequence so its own callers are
+        # not forced to copy. Materialise here rather than widen a method extensions override.
+        fact_ids=list(fact_ids),
     )
 
 

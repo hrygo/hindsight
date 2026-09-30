@@ -11,7 +11,7 @@ import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, cast
 
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -2405,6 +2405,22 @@ def _env_int(env_var: str) -> int | None:
     return int(raw) if raw else None
 
 
+def _env_int_or(env_var: str, default: int | None) -> int | None:
+    """`_env_int` with a caller-supplied fallback. Reads the variable once, same reason.
+
+    The fallback is itself optional: several of these settings use None to mean "fall back to
+    the per-bank value in the database" rather than to a number.
+    """
+    raw = os.getenv(env_var)
+    return int(raw) if raw else default
+
+
+def _env_str_list(env_var: str) -> list[str] | None:
+    """A comma-separated list setting, or None when unset. Single read, as `_env_int`."""
+    raw = os.getenv(env_var)
+    return _parse_str_list(raw) if raw else None
+
+
 def _env_float(env_var: str) -> float | None:
     """An optional float setting, or None when the variable is unset or empty. See `_env_int`."""
     raw = os.getenv(env_var)
@@ -4152,7 +4168,12 @@ class HindsightConfig:
 
         config = cls(
             # Database
-            database_backend=os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
+            # `.lower()` returns a plain `str`; the field declares the two backends it accepts,
+            # and an unknown value is rejected by that field rather than here.
+            database_backend=cast(
+                'Literal["postgresql", "oracle"]',
+                os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
+            ),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
             read_database_url=os.getenv(ENV_READ_DATABASE_URL) or None,
             read_db_pool_min_size=int(os.getenv(ENV_READ_DB_POOL_MIN_SIZE, str(DEFAULT_DB_POOL_MIN_SIZE))),
@@ -4912,9 +4933,7 @@ class HindsightConfig:
             file_storage_azure_account_name=os.getenv(ENV_FILE_STORAGE_AZURE_ACCOUNT_NAME) or None,
             file_storage_azure_account_key=os.getenv(ENV_FILE_STORAGE_AZURE_ACCOUNT_KEY) or None,
             file_parser=_parse_str_list(os.getenv(ENV_FILE_PARSER, DEFAULT_FILE_PARSER)),
-            file_parser_allowlist=_parse_str_list(os.getenv(ENV_FILE_PARSER_ALLOWLIST))
-            if os.getenv(ENV_FILE_PARSER_ALLOWLIST)
-            else None,
+            file_parser_allowlist=_env_str_list(ENV_FILE_PARSER_ALLOWLIST),
             file_parser_markitdown_ocr_enabled=os.getenv(
                 ENV_FILE_PARSER_MARKITDOWN_OCR_ENABLED,
                 str(DEFAULT_FILE_PARSER_MARKITDOWN_OCR_ENABLED),
@@ -5022,9 +5041,7 @@ class HindsightConfig:
                 os.getenv(ENV_CONSOLIDATION_MAX_TOKENS, str(DEFAULT_CONSOLIDATION_MAX_TOKENS))
             ),
             consolidation_max_completion_tokens=(
-                int(os.getenv(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS))
-                if os.getenv(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS)
-                else DEFAULT_CONSOLIDATION_MAX_COMPLETION_TOKENS
+                _env_int_or(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS, DEFAULT_CONSOLIDATION_MAX_COMPLETION_TOKENS)
             ),
             consolidation_recall_budget=os.getenv(ENV_CONSOLIDATION_RECALL_BUDGET, DEFAULT_CONSOLIDATION_RECALL_BUDGET),
             consolidation_source_facts_max_tokens=int(
@@ -5132,9 +5149,7 @@ class HindsightConfig:
             reflect_default_options=json.loads(os.getenv(ENV_REFLECT_DEFAULT_OPTIONS, "").strip() or "null")
             or DEFAULT_REFLECT_DEFAULT_OPTIONS,
             reflect_max_completion_tokens=(
-                int(os.getenv(ENV_REFLECT_MAX_COMPLETION_TOKENS))
-                if os.getenv(ENV_REFLECT_MAX_COMPLETION_TOKENS)
-                else DEFAULT_REFLECT_MAX_COMPLETION_TOKENS
+                _env_int_or(ENV_REFLECT_MAX_COMPLETION_TOKENS, DEFAULT_REFLECT_MAX_COMPLETION_TOKENS)
             ),
             enable_text_search=os.getenv(ENV_ENABLE_TEXT_SEARCH, str(DEFAULT_ENABLE_TEXT_SEARCH)).lower()
             in ("true", "1", "yes"),
@@ -5172,15 +5187,9 @@ class HindsightConfig:
             recall_budget_min=int(os.getenv(ENV_RECALL_BUDGET_MIN, str(DEFAULT_RECALL_BUDGET_MIN))),
             recall_budget_max=int(os.getenv(ENV_RECALL_BUDGET_MAX, str(DEFAULT_RECALL_BUDGET_MAX))),
             # Disposition settings (None = fall back to DB value)
-            disposition_skepticism=int(os.getenv(ENV_DISPOSITION_SKEPTICISM))
-            if os.getenv(ENV_DISPOSITION_SKEPTICISM)
-            else DEFAULT_DISPOSITION_SKEPTICISM,
-            disposition_literalism=int(os.getenv(ENV_DISPOSITION_LITERALISM))
-            if os.getenv(ENV_DISPOSITION_LITERALISM)
-            else DEFAULT_DISPOSITION_LITERALISM,
-            disposition_empathy=int(os.getenv(ENV_DISPOSITION_EMPATHY))
-            if os.getenv(ENV_DISPOSITION_EMPATHY)
-            else DEFAULT_DISPOSITION_EMPATHY,
+            disposition_skepticism=_env_int_or(ENV_DISPOSITION_SKEPTICISM, DEFAULT_DISPOSITION_SKEPTICISM),
+            disposition_literalism=_env_int_or(ENV_DISPOSITION_LITERALISM, DEFAULT_DISPOSITION_LITERALISM),
+            disposition_empathy=_env_int_or(ENV_DISPOSITION_EMPATHY, DEFAULT_DISPOSITION_EMPATHY),
             # OpenTelemetry tracing configuration
             otel_traces_enabled=os.getenv(ENV_OTEL_TRACES_ENABLED, str(DEFAULT_OTEL_TRACES_ENABLED)).lower()
             in ("true", "1", "yes"),

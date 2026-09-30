@@ -6,7 +6,7 @@ import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hindsight_api.config import DEFAULT_FILE_PARSER_MARKITDOWN_OCR_PROMPT
 
@@ -178,7 +178,10 @@ class MarkitdownParser(FileParser):
         except ImportError as e:
             raise RuntimeError("openai package is required when Markitdown OCR is enabled.") from e
 
-        client_kwargs: dict[str, object] = {
+        # A kwargs BAG, assembled conditionally below. Inferred, its value type is the union of
+        # everything in it, so the `**` unpack is checked as if every key could be every type --
+        # one diagnostic per parameter of the callee, none of them real.
+        client_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "base_url": base_url.strip(),
         }

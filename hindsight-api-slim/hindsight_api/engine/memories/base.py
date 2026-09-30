@@ -42,7 +42,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ...extensions.base import Extension
 
@@ -2110,7 +2110,10 @@ class MemoriesExtension(Extension, ABC):
             conn=conn,
             fq_table=fq_table,
             bank_id=bank_id,
-            fact_type=fact_type,
+            # `graph_view` accepts a list of fact types; `graph_units`, which stores override,
+            # declares a single one. Widening `graph_units` would land on every implementer, so
+            # the mismatch is stated here -- a list caller reaches a store that cannot take one.
+            fact_type=cast("str | None", fact_type),
             search_query=search_query,
             document_id=document_id,
             chunk_id=chunk_id,

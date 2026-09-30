@@ -5010,7 +5010,9 @@ def create_app(
             # Convert default schema to None for SQL compatibility (no schema prefix)
             schema = None if config.database_schema == DEFAULT_DATABASE_SCHEMA else config.database_schema
             poller = WorkerPoller(
-                backend=memory._backend,
+                # Not `_backend` directly: it is Optional only because `close()` clears it, and
+                # this runs while the engine is live.
+                backend=memory._require_backend(),
                 worker_id=worker_id,
                 executor=memory.execute_task,
                 poll_interval_ms=config.worker_poll_interval_ms,

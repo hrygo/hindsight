@@ -1947,7 +1947,10 @@ def _build_request_body(batch_impl, config, prompt: str, user_message: str, resp
     # fallback, so the batch and streaming paths can't disagree.
     if hasattr(response_schema, "model_json_schema"):
         retain_strict_schema = config.llm_strict_schema_retain
-        schema = strict_json_schema(response_schema) if retain_strict_schema else provider_json_schema(response_schema)
+        # `hasattr` narrows to an anonymous protocol, not back to `type[BaseModel]` -- which the
+        # parameter already declares, so the guard is belt-and-braces rather than the real check.
+        schema_cls = cast("type[BaseModel]", response_schema)
+        schema = strict_json_schema(schema_cls) if retain_strict_schema else provider_json_schema(schema_cls)
         request_body["response_format"] = {
             "type": "json_schema",
             "json_schema": {"name": "facts", "schema": schema, "strict": retain_strict_schema},
@@ -2191,7 +2194,10 @@ async def _extract_facts_from_chunk(
 
                 # Build combined fact text from the 4 dimensions: what | when | who | why
                 # In verbatim mode, leave combined_text empty — _collapse_to_verbatim backfills it
-                fact_data = {}
+                # A kwargs BAG for `Fact(**fact_data)` below: its inferred value type is the union of
+                # everything put in it, so the unpack is checked against that union for every field.
+                # Each value is checked where it is assigned.
+                fact_data: dict[str, Any] = {}
                 if extraction_mode == "verbatim":
                     combined_text = ""
                 else:
@@ -3108,7 +3114,10 @@ async def extract_facts_from_contents_batch_api(
             combined_text = " | ".join(combined_parts)
 
             # Temporal fields
-            fact_data = {}
+            # A kwargs BAG for `Fact(**fact_data)` below: its inferred value type is the union of
+            # everything put in it, so the unpack is checked against that union for every field.
+            # Each value is checked where it is assigned.
+            fact_data: dict[str, Any] = {}
             fact_kind = llm_fact.get("fact_kind", "conversation")
             if fact_kind not in ["conversation", "event", "other"]:
                 fact_kind = "conversation"

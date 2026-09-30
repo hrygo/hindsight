@@ -141,7 +141,7 @@ def _build_directives_applied(directives: list[dict[str, Any]] | None) -> list[D
 
 
 if TYPE_CHECKING:
-    from ..llm_wrapper import AnyLLMProvider, LLMProvider
+    from ..llm_wrapper import AnyLLMProvider
     from ..response_models import LLMToolCall
 
 logger = logging.getLogger(__name__)
@@ -1639,7 +1639,7 @@ async def _rewrite_to_length_budget(
     answer: str,
     document: StructuredDocument | None,
     max_tokens: int | None,
-    llm_config: "LLMProvider | None",
+    llm_config: "AnyLLMProvider | None",
 ) -> LengthRewrite:
     """Shorten ``answer`` to the caller's visible-length budget, if it overruns.
 
@@ -1730,7 +1730,7 @@ async def _process_done_tool(
     log_completion: Callable,
     reflect_id: str,
     directives_applied: list[DirectiveInfo],
-    llm_config: "LLMProvider | None" = None,
+    llm_config: "AnyLLMProvider | None" = None,
     response_schema: dict | None = None,
     max_tokens: int | None = None,
 ) -> ReflectAgentResult:
