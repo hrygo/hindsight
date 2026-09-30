@@ -1074,9 +1074,30 @@ class OperationValidatorExtension(Extension, ABC):
         """
         return ValidationResult.accept()
 
+    async def needs_bank_list_filter(self, request_context: "RequestContext") -> bool:
+        """
+        Whether filter_bank_list has to see this request's bank list.
+
+        filter_bank_list takes the whole list, so running it means ranking every bank
+        before the page can be cut. A validator that leaves the list untouched for some
+        callers returns False for them, and their page is read directly instead.
+
+        The default is True: a validator that does not override this is assumed to
+        filter every list.
+
+        Args:
+            request_context: Request context with auth info (already authenticated)
+
+        Returns:
+            True to run filter_bank_list on this request, False to skip it.
+        """
+        return True
+
     async def filter_bank_list(self, ctx: BankListContext) -> BankListResult:
         """
         Filter the bank list after querying.
+
+        Runs only when needs_bank_list_filter returns True for the request.
 
         Unlike validate_* methods, this is a post-query filter that narrows results
         rather than a gate that blocks the operation.

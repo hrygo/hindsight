@@ -15545,10 +15545,10 @@ class MemoryEngine(MemoryEngineInterface):
         # trim from the end instead of raising.
         limit = max(limit, 0)
         offset = max(offset, 0)
-        if self._operation_validator:
+        if self._operation_validator and await self._operation_validator.needs_bank_list_filter(request_context):
             # The validator may drop ANY bank, so the page has to be cut after it runs — and it
             # takes the list, not a page. Ranking the tenant is the price of a filter that can
-            # reject anything, and it is paid only by deployments that install one.
+            # reject anything, and it is paid only by requests the validator says it filters.
             from hindsight_api.extensions import BankListContext
 
             banks = await bank_utils.list_banks(self._backend, search_query=search_query)
@@ -15559,7 +15559,7 @@ class MemoryEngine(MemoryEngineInterface):
             total = len(banks)
             page = banks[offset : offset + limit]
         else:
-            # No filter, so the page can be cut before the rows are read: the order comes from the
+            # No filter for this request, so the page can be cut before the rows are read: the order comes from the
             # store, already sorted, and Postgres fills the page by id. O(page) rather than
             # O(total banks) — see `bank_utils.list_banks_page`.
             bank_page = await bank_utils.list_banks_page(

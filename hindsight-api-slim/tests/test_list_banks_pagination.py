@@ -15,6 +15,8 @@ import uuid
 
 import pytest
 
+from hindsight_api.extensions import BankListResult, OperationValidatorExtension, ValidationResult
+
 
 @pytest.fixture
 async def three_banks(memory, request_context):
@@ -137,3 +139,46 @@ async def test_http_endpoint_echoes_paging_and_filters(api_client, three_banks):
     assert body["offset"] == 1
     assert len(body["banks"]) == 1
     assert body["banks"][0]["bank_id"].startswith(prefix)
+
+
+class _HideOneBank(OperationValidatorExtension):
+    """A list filter that hides one bank, says whether it filters, and records if it ran."""
+
+    def __init__(self, hidden: str, *, filters: bool):
+        super().__init__({})
+        self.hidden, self.filters, self.ran = hidden, filters, False
+
+    async def validate_retain(self, ctx) -> ValidationResult:
+        return ValidationResult.accept()
+
+    async def validate_recall(self, ctx) -> ValidationResult:
+        return ValidationResult.accept()
+
+    async def validate_reflect(self, ctx) -> ValidationResult:
+        return ValidationResult.accept()
+
+    async def needs_bank_list_filter(self, request_context) -> bool:
+        return self.filters
+
+    async def filter_bank_list(self, ctx) -> BankListResult:
+        self.ran = True
+        return BankListResult(banks=[bank for bank in ctx.banks if bank["bank_id"] != self.hidden])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filters", [True, False])
+async def test_list_filter_runs_only_when_the_validator_asks_for_it(memory, request_context, three_banks, filters):
+    """A validator that does not filter this caller must not force the whole-tenant ranking:
+    the page comes straight from the store, and filter_bank_list is never handed a list."""
+    prefix, bank_ids = three_banks
+    validator = _HideOneBank(bank_ids[0], filters=filters)
+    saved, memory._operation_validator = memory._operation_validator, validator
+    try:
+        page = await memory.list_banks(search_query=prefix, limit=10, request_context=request_context)
+    finally:
+        memory._operation_validator = saved
+
+    listed = {bank["bank_id"] for bank in page["banks"]}
+    assert validator.ran is filters
+    assert listed == (set(bank_ids[1:]) if filters else set(bank_ids))
+    assert page["total"] == len(listed)
