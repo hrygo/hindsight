@@ -47,6 +47,7 @@ from ..config import (
     DEFAULT_STORE_DOCUMENT_TEXT,
     ENV_MODEL_INIT_TIMEOUT,
     LLM_STRATEGY_METADATA,
+    ConfigLike,
     HindsightConfig,
     LLMMemberConfig,
     LLMStrategyConfig,
@@ -761,7 +762,7 @@ class ByteStreamCounter:
         return chunk
 
 
-def _member_to_llm(member: "LLMMemberConfig", config: HindsightConfig, defaults: _LLMCallDefaults) -> LLMConfig:
+def _member_to_llm(member: "LLMMemberConfig", config: ConfigLike, defaults: _LLMCallDefaults) -> LLMConfig:
     """Build an LLMProvider from one indexed multi-LLM member.
 
     ``LLMProvider`` uses its arguments verbatim (it no longer reads global config),
@@ -826,7 +827,7 @@ def _member_call_defaults(member: "LLMMemberConfig", defaults: "_LLMCallDefaults
 
 def _build_llm(
     base: LLMConfig,
-    config: HindsightConfig,
+    config: ConfigLike,
     prefix: str,
     defaults: _LLMCallDefaults,
     fallback_prefix: str = "",
@@ -876,9 +877,7 @@ def _build_llm(
     return MultiLLMProvider([base, *extra], strategy)
 
 
-async def validate_retain_batch_support(
-    retain_llm_config: "LLMConfig | MultiLLMProvider", config: HindsightConfig
-) -> None:
+async def validate_retain_batch_support(retain_llm_config: "LLMConfig | MultiLLMProvider", config: ConfigLike) -> None:
     """Fail startup when batch retain is enabled but nothing configured can serve it.
 
     Otherwise the server would silently fall back to sync mode on every retain,
@@ -1602,7 +1601,7 @@ def _resolve_thinking_budget(config_dict: dict, budget: "Budget | None", max_tok
     return int(fixed[effective_budget])
 
 
-def _resolve_reranker_max_candidates(config: HindsightConfig, budget: "Budget | None") -> int:
+def _resolve_reranker_max_candidates(config: ConfigLike, budget: "Budget | None") -> int:
     """Map a Budget level to the cross-encoder candidate cap.
 
     Returns the per-level override (reranker_max_candidates_<level>) when it is set (> 0),

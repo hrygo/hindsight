@@ -124,13 +124,15 @@ class MarkitdownParser(FileParser):
 
         self._markitdown: "MarkItDown | None" = None
         self._ocr_enabled = ocr_enabled
-        self._ocr_kwargs = dict(
-            api_key=ocr_api_key,
-            base_url=ocr_base_url,
-            model=ocr_model,
-            prompt=ocr_prompt,
-            default_headers=ocr_default_headers,
-        )
+        # Five fields, not one kwargs dict: the dict's value type is the union of everything in
+        # it, so unpacking it into `_build_ocr_options` checked every parameter against that union
+        # instead of against its own declared type -- the call is the one place these values are
+        # constrained, and routing it through a bag was what made that check meaningless.
+        self._ocr_api_key = ocr_api_key
+        self._ocr_base_url = ocr_base_url
+        self._ocr_model = ocr_model
+        self._ocr_prompt = ocr_prompt
+        self._ocr_default_headers = ocr_default_headers
 
     def _get_markitdown(self) -> "MarkItDown":
         """Build the MarkItDown instance on first use (see __init__ for why)."""
@@ -138,7 +140,13 @@ class MarkitdownParser(FileParser):
             from markitdown import MarkItDown
 
             if self._ocr_enabled:
-                ocr_options = self._build_ocr_options(**self._ocr_kwargs)
+                ocr_options = self._build_ocr_options(
+                    api_key=self._ocr_api_key,
+                    base_url=self._ocr_base_url,
+                    model=self._ocr_model,
+                    prompt=self._ocr_prompt,
+                    default_headers=self._ocr_default_headers,
+                )
                 self._markitdown = MarkItDown(
                     llm_client=ocr_options.llm_client,
                     llm_model=ocr_options.llm_model,

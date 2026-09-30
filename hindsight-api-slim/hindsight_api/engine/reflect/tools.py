@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..chunk_ids import resolve_chunk_id_in
+from ..search.tags import TagsMatch
 from .tokenization import count_prompt_tokens
 
 if TYPE_CHECKING:
@@ -118,7 +119,7 @@ async def tool_search_mental_models(
     max_results: int = 5,
     top_result_max_tokens: int = 4000,
     tags: list[str] | None = None,
-    tags_match: str = "any",
+    tags_match: TagsMatch = "any",
     tag_groups: "list | None" = None,
     exclude_ids: list[str] | None = None,
     last_memory_write_at: datetime | None = None,
@@ -370,7 +371,7 @@ async def tool_search_observations(
     request_context: "RequestContext",
     max_tokens: int = 5000,
     tags: list[str] | None = None,
-    tags_match: str = "any",
+    tags_match: TagsMatch = "any",
     tag_groups: "list | None" = None,
     last_consolidated_at: datetime | None = None,
     pending_consolidation: int = 0,
@@ -463,7 +464,7 @@ async def tool_recall(
     request_context: "RequestContext",
     max_tokens: int = 2048,
     tags: list[str] | None = None,
-    tags_match: str = "any",
+    tags_match: TagsMatch = "any",
     tag_groups: "list | None" = None,
     connection_budget: int = 1,
     max_chunk_tokens: int = 1000,
