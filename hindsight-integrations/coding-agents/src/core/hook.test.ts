@@ -603,7 +603,7 @@ describe("buildHookOutput", () => {
     });
     expect(client.reflect).not.toHaveBeenCalled();
     expect(out.context ?? "").not.toContain("<hindsight_memory>");
-    // Tool-only mode's pull trigger: the roster refresh must carry the pages-first rule.
+    // Tool-only mode's pull trigger: relevance-gated pages-first, not every new goal.
     const cfg2 = resolveConfig({ autoReflect: false, pageRefreshEveryTurns: 1 });
     const out2 = await buildHookOutput({
       harness: "claude-code",
@@ -612,7 +612,9 @@ describe("buildHookOutput", () => {
       client,
       cacheFile,
     });
-    expect(out2.context ?? "").toContain("NEW task or goal");
+    expect(out2.context ?? "").toContain("task depends on");
+    expect(out2.context ?? "").toContain("Skip memory retrieval for self-contained translation");
+    expect(out2.context ?? "").not.toContain("NEW task or goal");
   });
 
   it("fetches the page ROSTER (ids + titles, no content) on the first turn; nothing injected from it", async () => {

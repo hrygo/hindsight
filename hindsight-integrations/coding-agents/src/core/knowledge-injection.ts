@@ -53,11 +53,12 @@ function indexLine(pages: PageRef[]): string {
  * context. (Omits hindsight_diagnose — pure troubleshooting, no workflow trigger.)
  */
 const TOOL_GUIDE =
-  "- hindsight_search_knowledge_pages(query) — FIRST STOP, and the way IN to everything below. The code " +
-  "shows what is true today but not what was decided or why; memory shows what was decided or said " +
-  "back then but not whether it still holds. Work built from either alone goes wrong: from code alone " +
-  "it quietly re-litigates settled questions, from memory alone it acts on stale claims. Search " +
-  "BEFORE you act whenever the turn is one of these — they are the ones that go wrong silently:\n" +
+  "- hindsight_search_knowledge_pages(query) — the way IN when this task depends on this repository's " +
+  "past decisions, conventions, or initiatives. The code shows what is true today but not what was " +
+  "decided or why; memory shows what was decided or said back then but not whether it still holds. " +
+  "Work built from either alone goes wrong: from code alone it quietly re-litigates settled questions, " +
+  "from memory alone it acts on stale claims. Search BEFORE you act whenever the turn is one of these — " +
+  "they are the ones that go wrong silently:\n" +
   "    • the user reports a bug or a wrong response (the intended behaviour, and the status code or " +
   "value it should return, may already have been decided);\n" +
   "    • you are about to write or change a test (what this project expects a change to ship with, and " +
@@ -65,6 +66,8 @@ const TOOL_GUIDE =
   "    • you are implementing something new, or two parts have to fit together;\n" +
   "    • the user asks why something is the way it is, or what is left to do;\n" +
   "    • you are about to commit, and need to know what the change was supposed to honour.\n" +
+  "  Skip memory retrieval for self-contained translation, rewriting, formatting, and one-step tasks " +
+  "whose required facts are already supplied.\n" +
   "  It ranks the pages by relevance and returns the matching passage, which a page title cannot tell " +
   "you. What it returns is a past record, not a live reading: a claim that something was fixed, " +
   "passes, or works is what someone said then — check it against the code before you rely on it, " +
@@ -75,9 +78,9 @@ const TOOL_GUIDE =
   '"> 🧠 **From Hindsight memory (<page>)** — <the specific facts you drew on>". Rewriting a ' +
   "snippet in your own words does not make it yours. A search that turned up nothing useful needs " +
   "no mention at all — just carry on.\n" +
-  "- hindsight_list_knowledge_pages / hindsight_read_knowledge_page — BEFORE substantial work, list the pages and " +
-  "read the relevant ones to ground yourself in this repo's architecture, conventions, and past decisions instead " +
-  "of re-deriving them from the code; follow any [[page:<id>]] links you see.\n" +
+  "- hindsight_list_knowledge_pages / hindsight_read_knowledge_page — before work that depends on this " +
+  "repo's past decisions, list the pages and read the relevant ones instead of re-deriving them from " +
+  "the code; follow any [[page:<id>]] links you see.\n" +
   "- hindsight_reflect(query) — when pages are too shallow and you need the WHY: deep reasoning over the " +
   "repo's full memory for the past decision and exact values that explain a behavior or bug (slower — " +
   'use deliberately, and credit results with a blockquote header "> 🧠 **From Hindsight memory** — <summary>").\n' +
@@ -95,9 +98,10 @@ const TOOL_GUIDE =
  * when those pages do not contain enough depth for the new goal.
  */
 const PAGES_FIRST_ON_GOALS =
-  "- The user just set a NEW task or goal → search the knowledge pages FIRST with " +
-  "hindsight_search_knowledge_pages. No synthesis is injected automatically in this configuration; " +
-  "call hindsight_reflect only when those pages are too shallow and deeper reasoning is needed.\n";
+  "- When a task depends on this repository's past decisions, conventions, or initiatives, search " +
+  "the relevant knowledge pages first with hindsight_search_knowledge_pages. No synthesis is injected " +
+  "automatically in this configuration; call hindsight_reflect only when those pages are too shallow " +
+  "and deeper reasoning is needed.\n";
 
 export interface ToolGuideOpts {
   /** Add the new-goal pull trigger (no automatic synthesis: cfg.autoInject !== "reflect"). It used to send
@@ -124,8 +128,9 @@ export function buildKnowledgePreamble(pages: PageRef[], opts?: ToolGuideOpts): 
     "memory behind them). The tools below are registered, but you must actually CALL them at the right moments:\n" +
     `${toolGuide(opts)}\n` +
     "ALSO your correction tool: when you verify a Hindsight memory is wrong or stale, ingest a " +
-    '"Correction: <topic>" doc stating what memory claimed, what is true now, and the evidence — ' +
-    "newer facts supersede older ones.\n" +
+    '"Correction: <topic>" doc stating what memory claimed, what is true now, and the evidence. ' +
+    "This records the correction but does not guarantee permanent precedence over older memory; " +
+    "re-query and verify against the current authoritative source.\n" +
     `${body}\n` +
     "This tool guide and the page list are re-injected for you periodically as things change.\n" +
     "</hindsight_knowledge>"

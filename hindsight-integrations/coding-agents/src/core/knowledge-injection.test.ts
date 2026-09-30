@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parsePageList, buildKnowledgePreamble, buildRosterRefresh } from "./knowledge-injection";
 
@@ -59,7 +61,7 @@ describe("buildKnowledgePreamble", () => {
     expect(out).toMatch(/no knowledge pages yet|still learning/i);
   });
 
-  it("checks knowledge pages before reflection in tool-only mode", () => {
+  it("checks relevant knowledge pages before reflection without forcing every new goal", () => {
     for (const out of [
       buildKnowledgePreamble([{ id: "p1", title: "Component map" }], {
         reflectOnNewGoals: true,
@@ -68,13 +70,28 @@ describe("buildKnowledgePreamble", () => {
         reflectOnNewGoals: true,
       }),
     ]) {
-      expect(out).toMatch(/new task or goal.*knowledge pages FIRST/is);
+      expect(out).not.toMatch(/user just set a NEW task or goal.*knowledge pages FIRST/is);
+      expect(out).toMatch(/task depends on.*past decisions.*knowledge pages first/is);
+      expect(out).toMatch(/skip memory retrieval for self-contained translation/is);
       expect(out).toMatch(/hindsight_reflect only when.*pages are too shallow/is);
       // No `s` flag ON PURPOSE: this must stay a per-LINE guard against the old wording
       // ("call hindsight_reflect with that goal FIRST"). With `s` it would span newlines and
       // match the legitimate "hindsight_reflect ..." / "FIRST STOP" lines further down the guide.
       expect(out).not.toMatch(/hindsight_reflect.*FIRST/);
     }
+  });
+
+  it("states the same correction boundary in the packaged skill source", () => {
+    const preamble = readFileSync(
+      fileURLToPath(new URL("../../skill-src/preamble.md", import.meta.url)),
+      "utf8"
+    );
+    expect(preamble).not.toMatch(/permanently outranks/i);
+    expect(preamble).toMatch(/does not\s+guarantee/i);
+    expect(preamble).toMatch(/change the source file first/i);
+    expect(preamble).toMatch(/depends on this repository's past decisions/i);
+    expect(preamble).toMatch(/skip memory retrieval for self-contained translation/i);
+    expect(preamble).not.toMatch(/FIRST STOP for project questions/i);
   });
 });
 

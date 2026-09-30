@@ -18,8 +18,9 @@ explains what happens automatically, which tools you have, and how to configure 
   conversations) and keeps 5 knowledge pages current. There is NO ingest command to run.
 - **Session synthesis**: by default, the first prompt of a session triggers one deep memory
   synthesis (`reflect`) injected into context. `autoInject` switches the source: `pages` (knowledge
-  page search hits), `recall` (recalled observations), or `none` (nothing injected; the agent
-  searches the knowledge pages first and reflects only when they are too shallow).
+  page search hits), `recall` (recalled observations), or `none` (nothing injected; when a task
+  depends on this repository's past decisions, the agent searches the relevant knowledge pages
+  first and reflects only when they are too shallow).
 - **Write-back**: the session transcript is retained into the bank automatically at session end
   (per-turn on opencode). The user never needs to "save" a conversation.
 
@@ -38,9 +39,12 @@ When the user says "store this in hindsight" / "remember this":
 
 ## Retrieving
 
-- `hindsight_search_knowledge_pages(query)` — FIRST STOP for project questions (components,
-  conventions, past decisions, initiatives). Server-side hybrid search, fast.
-- `hindsight_read_knowledge_page(page_id)` / `hindsight_list_knowledge_pages` — read pages fully.
+- When a task depends on this repository's past decisions, conventions, or initiatives, call
+  `hindsight_search_knowledge_pages(query)` first. Server-side hybrid search, fast.
+- Skip memory retrieval for self-contained translation, rewriting, formatting, and one-step tasks
+  whose required facts are already supplied.
+- `hindsight_read_knowledge_page(page_id)` / `hindsight_list_knowledge_pages` — read the relevant
+  pages in full when search results need deeper context.
 - `hindsight_reflect(query)` — deep reasoning over the whole memory for WHY questions and exact
   decided values; slower (seconds), use deliberately.
 - Credit visibly whenever memory informs an answer: start that part with
@@ -56,6 +60,7 @@ source contradicts it), FIX THE RECORD — don't just ignore it. Call
 - **content**: (1) what memory claimed, (2) what is verifiably true now, (3) the evidence you
   checked (file/commit/output). Quote exact values verbatim.
 
-Newer facts supersede older ones in retrieval, so one clear correction permanently outranks the
-stale memory. Do this whenever you catch a wrong injected memory, a stale knowledge-page claim, or
-an outdated decision — silent disregard leaves the trap armed for the next session.
+If the corrected content is already managed by a document synchronizer, change the source file first
+and ingest one precise correction only when the memory layer still needs it. The correction does not
+guarantee permanent precedence over older memory: re-query and verify against the current
+authoritative source. Silent disregard leaves the trap armed for the next session.
