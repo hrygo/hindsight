@@ -17,14 +17,20 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
 from ..llm_interface import ProviderContentPolicyError, ProviderRateLimitResetError
-from ..llm_wrapper import LLMConfig, OutputTooLongError, parse_llm_json, sanitize_llm_output, sanitize_value
+from ..llm_wrapper import (
+    AnyLLMProvider,
+    OutputTooLongError,
+    parse_llm_json,
+    sanitize_llm_output,
+    sanitize_value,
+)
 from ..operation_metadata import RetainExtractionErrors
 from ..response_models import TokenUsage
 from ..structured_output import provider_json_schema, strict_json_schema
 from . import attachment_content
 
 if TYPE_CHECKING:
-    from .attachment_store import RetainAttachmentLoader
+    from .attachment_store import AttachmentLoader
 from .entity_labels import (
     EntityLabelsConfig,
     MapField,
@@ -1965,12 +1971,12 @@ async def _extract_facts_from_chunk(
     total_chunks: int,
     event_date: datetime | None,
     context: str,
-    llm_config: "LLMConfig",
+    llm_config: "AnyLLMProvider",
     config,
     agent_name: str | None = None,
     metadata: dict[str, str] | None = None,
-    attachment_loader: "RetainAttachmentLoader | None" = None,
-    vlm_config: "LLMConfig | None" = None,
+    attachment_loader: "AttachmentLoader | None" = None,
+    vlm_config: "AnyLLMProvider | None" = None,
     extraction_prompt: ExtractionPrompt | None = None,
 ) -> tuple[list[dict[str, str]], TokenUsage]:
     """
@@ -2397,12 +2403,12 @@ async def _extract_facts_with_auto_split(
     total_chunks: int,
     event_date: datetime | None,
     context: str,
-    llm_config: LLMConfig,
+    llm_config: AnyLLMProvider,
     config,
     agent_name: str | None = None,
     metadata: dict[str, str] | None = None,
-    attachment_loader: "RetainAttachmentLoader | None" = None,
-    vlm_config: "LLMConfig | None" = None,
+    attachment_loader: "AttachmentLoader | None" = None,
+    vlm_config: "AnyLLMProvider | None" = None,
     extraction_prompt: ExtractionPrompt | None = None,
 ) -> tuple[list[dict[str, str]], TokenUsage]:
     """
@@ -2522,13 +2528,13 @@ async def _extract_facts_with_auto_split(
 async def extract_facts_from_text(
     text: str,
     event_date: datetime | None,
-    llm_config: LLMConfig,
+    llm_config: AnyLLMProvider,
     config,
     context: str = "",
     metadata: dict[str, str] | None = None,
     agent_name: str | None = None,
-    attachment_loader: "RetainAttachmentLoader | None" = None,
-    vlm_config: "LLMConfig | None" = None,
+    attachment_loader: "AttachmentLoader | None" = None,
+    vlm_config: "AnyLLMProvider | None" = None,
     extraction_prompt: ExtractionPrompt | None = None,
 ) -> tuple[list[Fact], list[tuple[str, int]], TokenUsage]:
     """
@@ -3359,8 +3365,8 @@ async def extract_facts_from_contents(
     pool=None,
     operation_id: str | None = None,
     schema: str | None = None,
-    attachment_loader: "RetainAttachmentLoader | None" = None,
-    vlm_config: "LLMConfig | None" = None,
+    attachment_loader: "AttachmentLoader | None" = None,
+    vlm_config: "AnyLLMProvider | None" = None,
 ) -> ExtractionResult:
     """
     Extract facts from multiple content items in parallel.

@@ -141,7 +141,7 @@ def _build_directives_applied(directives: list[dict[str, Any]] | None) -> list[D
 
 
 if TYPE_CHECKING:
-    from ..llm_wrapper import LLMProvider
+    from ..llm_wrapper import AnyLLMProvider, LLMProvider
     from ..response_models import LLMToolCall
 
 logger = logging.getLogger(__name__)
@@ -251,7 +251,7 @@ def _is_done_tool(name: str) -> bool:
 async def _generate_structured_output(
     answer: str,
     response_schema: dict,
-    llm_config: "LLMProvider",
+    llm_config: "AnyLLMProvider",
     reflect_id: str,
     max_tokens: int | None = None,
 ) -> StructuredOutputResult:
@@ -514,7 +514,7 @@ def _spawn_cache_cleanup(
 
 
 async def run_reflect_agent(
-    llm_config: "LLMProvider",
+    llm_config: "AnyLLMProvider",
     bank_id: str,
     query: str,
     bank_profile: dict[str, Any],
@@ -573,7 +573,7 @@ async def run_reflect_agent(
 
 
 async def _run_reflect_agent_inner(
-    llm_config: "LLMProvider",
+    llm_config: "AnyLLMProvider",
     bank_id: str,
     query: str,
     bank_profile: dict[str, Any],

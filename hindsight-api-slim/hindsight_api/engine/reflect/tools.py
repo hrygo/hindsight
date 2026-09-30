@@ -19,9 +19,11 @@ from ..search.tags import TagsMatch
 from .tokenization import count_prompt_tokens
 
 if TYPE_CHECKING:
-    from asyncpg import Connection
-
+    # The engine's own connection abstraction, which is what every caller passes. This said
+    # `asyncpg.Connection` -- the concrete driver type -- which predates that abstraction and
+    # was never what arrived here; only `.fetch()` is used, and both provide it.
     from ...api.http import RequestContext
+    from ..db.base import DatabaseConnection
     from ..memory_engine import MemoryEngine
 
 logger = logging.getLogger(__name__)
@@ -112,7 +114,7 @@ def _document_metadata_from_retain_params(retain_params: Any) -> dict[str, Any] 
 
 async def tool_search_mental_models(
     memory_engine: "MemoryEngine",
-    conn: "Connection",
+    conn: "DatabaseConnection",
     bank_id: str,
     query: str,
     query_embedding: list[float],
@@ -303,7 +305,7 @@ async def tool_search_mental_models(
 
 
 async def tool_read_mental_models(
-    conn: "Connection",
+    conn: "DatabaseConnection",
     bank_id: str,
     mental_model_ids: list[str],
     max_tokens: int = 6000,
@@ -531,7 +533,7 @@ async def tool_recall(
 
 
 async def tool_expand(
-    conn: "Connection",
+    conn: "DatabaseConnection",
     bank_id: str,
     memory_ids: list[str],
     depth: str,
