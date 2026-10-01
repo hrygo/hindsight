@@ -30,7 +30,11 @@ async def test_mcp_endpoint_routing_integration(memory):
         # Create an HTTPX client that routes to our ASGI app
         from httpx import ASGITransport
 
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"X-Bank-Id": "test-bank"},
+        ) as http_client:
             # Test 1: Multi-bank endpoint /mcp/
             async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                 read_stream,
@@ -105,7 +109,11 @@ async def test_mcp_no_trailing_slash_works(memory):
     async with app.router.lifespan_context(app):
         from httpx import ASGITransport
 
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"X-Bank-Id": "test-bank"},
+        ) as http_client:
             # /mcp (no slash) should work the same as /mcp/
             async with streamable_http_client("http://test/mcp", http_client=http_client) as (
                 read_stream,
@@ -151,7 +159,11 @@ async def test_mcp_tool_execution_through_client(memory):
     app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
 
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"X-Bank-Id": "test-bank"},
+        ) as http_client:
             async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                 read_stream,
                 write_stream,
@@ -186,7 +198,11 @@ async def test_mcp_mental_model_validation_through_client(memory):
     app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
 
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"X-Bank-Id": "test-bank"},
+        ) as http_client:
             async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                 read_stream,
                 write_stream,
@@ -232,7 +248,11 @@ async def test_mcp_bank_named_sse_routes_to_single_bank(memory):
     app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
 
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"X-Bank-Id": "test-bank"},
+        ) as http_client:
             async with streamable_http_client("http://test/mcp/sse/", http_client=http_client) as (
                 read_stream,
                 write_stream,
@@ -268,7 +288,11 @@ async def test_mcp_bank_named_messages_routes_to_single_bank(memory):
     app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
 
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"X-Bank-Id": "test-bank"},
+        ) as http_client:
             async with streamable_http_client("http://test/mcp/messages/", http_client=http_client) as (
                 read_stream,
                 write_stream,
@@ -313,7 +337,7 @@ async def test_mcp_tool_execution_with_different_mcp_and_tenant_tokens(memory):
             async with httpx.AsyncClient(
                 transport=ASGITransport(app=app),
                 base_url="http://test",
-                headers={"Authorization": f"Bearer {mcp_token}"},
+                headers={"Authorization": f"Bearer {mcp_token}", "X-Bank-Id": "test-bank"},
             ) as http_client:
                 async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                     read_stream,
@@ -359,7 +383,11 @@ async def test_mcp_rejects_wrong_mcp_token_even_if_matches_tenant_key(memory):
         app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
 
         async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+            async with httpx.AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+                headers={"X-Bank-Id": "test-bank"},
+            ) as http_client:
                 # Try connecting with the tenant key (wrong for MCP auth)
                 response = await http_client.post(
                     "http://test/mcp/",
@@ -371,3 +399,50 @@ async def test_mcp_rejects_wrong_mcp_token_even_if_matches_tenant_key(memory):
                     json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                 )
                 assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_mcp_unnamed_bank_is_rejected(memory):
+    """/mcp/ with no bank in the path and no X-Bank-Id header must fail loudly.
+
+    It used to fall back to a bank literally named "default", so a caller that
+    forgot bank_id got a successful write into a bank it never chose — invisible
+    unless someone went looking for a junk bank later. Naming the bank in the
+    path or the header is now required; HINDSIGHT_MCP_BANK_ID remains available
+    for a deployment that deliberately wants one fallback.
+    """
+    from httpx import ASGITransport
+
+    from hindsight_api.api import create_app
+
+    app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http_client:
+            body = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {},
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+
+            # No path bank, no X-Bank-Id header → rejected, not silently banked.
+            response = await http_client.post("http://test/mcp/", headers=headers, json=body)
+            assert response.status_code == 400
+            assert "No bank specified" in response.text
+
+            # Same request with the header → the multi-bank app answers normally.
+            ok = await http_client.post(
+                "http://test/mcp/",
+                headers={**headers, "X-Bank-Id": "test-bank"},
+                json=body,
+            )
+            assert ok.status_code == 200
+
+            # A bank-scoped path needs no header at all.
+            scoped = await http_client.post("http://test/mcp/test-bank/", headers=headers, json=body)
+            assert scoped.status_code == 200

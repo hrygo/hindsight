@@ -39,8 +39,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Default bank_id from environment variable
-DEFAULT_BANK_ID = os.environ.get("HINDSIGHT_MCP_BANK_ID", "default")
+# Optional deployment-wide fallback bank_id. Deliberately NO literal default: an
+# unqualified /mcp/ request must fail loudly rather than silently land in a bank
+# named "default", which reads as success while filing the data somewhere the
+# caller never chose. A caller names its bank through the URL path, the
+# X-Bank-Id header, or (for a deployment that genuinely wants one fallback)
+# this env var.
+DEFAULT_BANK_ID = os.environ.get("HINDSIGHT_MCP_BANK_ID")
 
 # Legacy MCP authentication token (for backwards compatibility)
 # If set, this token is checked first before TenantExtension auth
@@ -361,7 +366,9 @@ class MCPMiddleware:
     Bank ID resolution priority:
         1. URL path (e.g., /mcp/{bank_id}/) → single-bank mode
         2. X-Bank-Id header → multi-bank mode
-        3. HINDSIGHT_MCP_BANK_ID env var → multi-bank mode (default: "default")
+        3. HINDSIGHT_MCP_BANK_ID env var → multi-bank mode. Optional; when unset,
+           a request that names no bank is rejected instead of being banked in a
+           placeholder bank called "default".
 
     Examples:
         # Single-bank mode (recommended for agent isolation)
@@ -512,10 +519,22 @@ class MCPMiddleware:
         if not bank_id:
             bank_id = self._get_header(scope, "X-Bank-Id")
 
-        # Fall back to default bank_id
+        # No bank named in the path or the header: refuse rather than guess. A
+        # silent fallback writes into whatever bank happens to be called
+        # "default", so the call succeeds while the data lands in a place the
+        # caller never asked for and never sees unless they go looking.
         if not bank_id:
+            if not DEFAULT_BANK_ID:
+                await self._send_error(
+                    send,
+                    400,
+                    "No bank specified. Use /mcp/{bank_id}/ for a bank-scoped endpoint, "
+                    "set the X-Bank-Id header for multi-bank mode, or set "
+                    "HINDSIGHT_MCP_BANK_ID to configure a fallback bank for this deployment.",
+                )
+                return
             bank_id = DEFAULT_BANK_ID
-            logger.debug(f"Using default bank_id: {bank_id}")
+            logger.debug(f"Using configured fallback bank_id: {bank_id}")
 
         # Select the appropriate MCP app based on how bank_id was provided:
         # - Path-based bank_id → single-bank app (no bank_id param, scoped tools)
