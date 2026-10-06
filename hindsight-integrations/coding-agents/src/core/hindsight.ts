@@ -816,7 +816,9 @@ export class HindsightClient {
    * page read/update in this client goes through the same knowledge-base ids, so a page id from
    * here, from `searchKnowledgePages`, or from a `[[page:<id>]]` link all resolve identically.
    */
-  async listPages(): Promise<unknown> {
+  async listPages(): Promise<{
+    items: { id: string; name: string; description?: string; folder?: string }[];
+  }> {
     const items: { id: string; name: string; description?: string; folder?: string }[] = [];
     const walk = (nodes: KnowledgeNode[], folder?: string): void => {
       for (const n of nodes) {

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { buildKnowledgeTools } from "./knowledge-tools";
 import { DEFAULT_REFLECT_TOOL_TIMEOUT_MS } from "./config";
-import type { HindsightClient } from "./hindsight";
+import { HindsightClient } from "./hindsight";
 
 /** Minimal stub of the HindsightClient surface the tools call — no SDK, no network. */
 function stubClient(overrides: Partial<Record<string, ReturnType<typeof vi.fn>>> = {}) {
@@ -181,6 +181,7 @@ describe("buildKnowledgeTools", () => {
         page: "Uploader guide",
         page_id: "p1",
         description: "How do uploads recover from failures?",
+        description_truncated: false,
         snippet: "Uploads retry with backoff…",
       },
       { page: "Auth notes", page_id: "p2", snippet: "Tokens rotate daily." },
@@ -221,12 +222,156 @@ describe("buildKnowledgeTools", () => {
   });
 
   it("hindsight_list_knowledge_pages calls client.listPages() with no args", async () => {
-    const client = stubClient({ listPages: vi.fn(async () => ({ pages: [{ id: "p1" }] })) });
-    const tools = buildKnowledgeTools(client, "repo-a");
-    const tool = findTool(tools, "hindsight_list_knowledge_pages");
+    const client = stubClient({
+      listPages: vi.fn(async () => ({ items: [{ id: "p1", name: "X" }] })),
+    });
+    const tool = findTool(buildKnowledgeTools(client, "repo-a"), "hindsight_list_knowledge_pages");
     const result = await tool.handler({});
     expect(client.listPages).toHaveBeenCalledWith();
-    expect(JSON.parse(result.content[0].text)).toEqual({ pages: [{ id: "p1" }] });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.items).toEqual([{ id: "p1", name: "X" }]);
+    expect(payload.read_hint).toContain("hindsight_read_knowledge_page(page_id)");
+  });
+
+  it.each([
+    { source: undefined, expected: {} },
+    { source: " \n\t ", expected: {} },
+    {
+      source: "  Uploads\n retry\twith backoff.  ",
+      expected: { description: "Uploads retry with backoff.", description_truncated: false },
+    },
+    {
+      source: "界".repeat(200),
+      expected: { description: "界".repeat(200), description_truncated: false },
+    },
+    {
+      source: "界".repeat(201),
+      expected: { description: "界".repeat(199) + "…", description_truncated: true },
+    },
+    {
+      source: "😀".repeat(201),
+      expected: { description: "😀".repeat(199) + "…", description_truncated: true },
+    },
+  ])(
+    "bounds list and search descriptions without splitting Unicode: $source",
+    async ({ source, expected }) => {
+      const items = [{ id: "kp-1", name: "Guide", folder: "Initiatives", description: source }];
+      const hits = [
+        { id: "kp-1", name: "Guide", source_query: source, snippet: "Relevant text", score: 0.03 },
+      ];
+      const client = stubClient({
+        listPages: vi.fn(async () => ({ items })),
+        searchKnowledgePages: vi.fn(async () => hits),
+      });
+      const tools = buildKnowledgeTools(client, "repo-a");
+      const list = JSON.parse(
+        (await findTool(tools, "hindsight_list_knowledge_pages").handler({})).content[0].text
+      );
+      const search = JSON.parse(
+        (await findTool(tools, "hindsight_search_knowledge_pages").handler({ query: "q" }))
+          .content[0].text
+      );
+      expect(list.items).toEqual([
+        { id: "kp-1", name: "Guide", folder: "Initiatives", ...expected },
+      ]);
+      expect(search.pages).toEqual([
+        { page_id: "kp-1", page: "Guide", snippet: "Relevant text", ...expected },
+      ]);
+      for (const payload of [list, search]) {
+        expect(payload.read_hint).toContain("hindsight_read_knowledge_page(page_id)");
+        expect(payload.read_hint).toContain("source-query excerpts");
+      }
+      expect(items[0].description).toBe(source);
+      expect(hits[0].source_query).toBe(source);
+    }
+  );
+
+  it("shrinks navigation only, preserves full read and raw queries, and uses only bank-scoped GETs", async () => {
+    const source =
+      "本项目知识页导航与部署边界。\n" + "保持当前规则，不重复完整生成指令。".repeat(100);
+    const pages = Array.from({ length: 5 }, (_, i) => ({
+      id: `kp-${i}`,
+      kind: "page" as const,
+      name: `Guide ${i}`,
+      description: source,
+    }));
+    const hits = pages.map((p) => ({
+      id: p.id,
+      name: p.name,
+      source_query: source,
+      snippet: "Relevant text",
+      score: 0.03,
+    }));
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(init?.method).toBe("GET");
+      expect(url).toContain("/v1/default/banks/repo-a/knowledge-base/");
+      if (url.includes("/tree")) return Response.json({ roots: pages });
+      if (url.includes("/search?")) return Response.json({ results: hits });
+      if (url.endsWith("/pages/kp-0"))
+        return Response.json({ ...pages[0], body: "Full page body" });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const client = new HindsightClient({ apiUrl: "http://x", bank: "repo-a" });
+      const tools = buildKnowledgeTools(client, "repo-a");
+      const listResult = await findTool(tools, "hindsight_list_knowledge_pages").handler({});
+      const searchResult = await findTool(tools, "hindsight_search_knowledge_pages").handler({
+        query: "navigation",
+      });
+      const readResult = await findTool(tools, "hindsight_read_knowledge_page").handler({
+        page_id: "kp-0",
+      });
+      for (const result of [listResult, searchResult, readResult])
+        expect(result.isError).toBeFalsy();
+      const rawList = await client.listPages();
+      const rawSearch = await client.searchKnowledgePages("navigation");
+      expect(rawList.items.map((p) => p.description)).toEqual(Array(5).fill(source));
+      expect(rawSearch.map((p) => p.source_query)).toEqual(Array(5).fill(source));
+      expect(JSON.parse(readResult.content[0].text)).toEqual({
+        id: "kp-0",
+        name: "Guide 0",
+        description: source,
+        body: "Full page body",
+      });
+      const list = JSON.parse(listResult.content[0].text);
+      const search = JSON.parse(searchResult.content[0].text);
+      expect(list.items.map((p: { id: string }) => p.id)).toEqual(pages.map((p) => p.id));
+      expect(search.pages.map((p: { page_id: string }) => p.page_id)).toEqual(
+        pages.map((p) => p.id)
+      );
+      const beforeList = Buffer.byteLength(JSON.stringify(rawList, null, 2));
+      const beforeSearch = Buffer.byteLength(
+        JSON.stringify(
+          {
+            pages: hits.map((h) => ({
+              page: h.name,
+              page_id: h.id,
+              description: h.source_query,
+              snippet: h.snippet,
+            })),
+            crediting: search.crediting,
+          },
+          null,
+          2
+        )
+      );
+      const afterList = Buffer.byteLength(listResult.content[0].text);
+      const afterSearch = Buffer.byteLength(searchResult.content[0].text);
+      expect(afterList).toBeLessThan(beforeList / 4);
+      expect(afterSearch).toBeLessThan(beforeSearch / 4);
+      console.info(
+        JSON.stringify({
+          fixture: "five long source queries",
+          beforeList,
+          afterList,
+          beforeSearch,
+          afterSearch,
+        })
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("hindsight_read_knowledge_page calls client.getPage(page_id)", async () => {

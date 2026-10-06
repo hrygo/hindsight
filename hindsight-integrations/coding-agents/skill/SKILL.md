@@ -304,6 +304,14 @@ pinned to one knowledge tier, so a page draws only on the facts the extractor ro
 | `Key decisions and rationale`  | the significant technical decisions and the durable "why we do it this way" behind them                 | `knowledge:decision`     |
 | `Initiatives and enhancements` | the major initiatives and features over time, linking out to each captured initiative's own page        | `knowledge:feature-work` |
 
+**Navigation output.** `hindsight_list_knowledge_pages` and `hindsight_search_knowledge_pages`
+show `description` as a single-line excerpt of the page's generation question, not a conclusion
+from its content. Each excerpt is capped at 200 Unicode code points (including the `…` marker);
+`description_truncated` says whether text was omitted. Titles, page ids, folders, search order,
+and relevance snippets are preserved. A shared `read_hint` points to
+`hindsight_read_knowledge_page(page_id)`, which returns the full description and page body.
+This display-only bound does not change stored descriptions, source queries, or refresh policies.
+
 `pages` says which of them to seed and what each one asks. Keys are the page names above, matched
 ignoring case and surrounding spaces:
 

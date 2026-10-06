@@ -71,6 +71,34 @@ const CREDIT_REMINDER =
   "silently — an unhelpful search needs no mention. These are past records: check a claim that " +
   "something was fixed or works against the code before relying on it.";
 
+const DESCRIPTION_MAX_CHARS = 200;
+const PAGE_READ_HINT =
+  "Descriptions are single-line source-query excerpts, not page conclusions (at most 200 Unicode " +
+  "code points, including …). description_truncated marks omitted text. Call " +
+  "hindsight_read_knowledge_page(page_id) with the item's id (search: page_id) for the full " +
+  "description and page body.";
+
+function navigationDescription(source?: string): {
+  description?: string;
+  description_truncated?: boolean;
+} {
+  const text = source?.replace(/\s+/gu, " ").trim();
+  if (!text) return {};
+  // Tree descriptions are generation queries, not short blurbs; keep the raw query on the client
+  // for synchronization and full reads, and bound only the agent's navigation preview.
+  const chars = Array.from(text);
+  const truncated = chars.length > DESCRIPTION_MAX_CHARS;
+  return {
+    description: truncated
+      ? chars
+          .slice(0, DESCRIPTION_MAX_CHARS - 1)
+          .join("")
+          .trimEnd() + "…"
+      : text,
+    description_truncated: truncated,
+  };
+}
+
 export interface ToolSpec {
   name: string;
   description: string;
@@ -207,7 +235,8 @@ export function buildKnowledgeTools(
         "Search this repository's Hindsight knowledge pages for content relevant to a query — " +
         "hybrid full-text + semantic search, server-side. Call this when the user's question may " +
         "be answered by the project's accumulated knowledge (architecture, conventions, decisions, " +
-        "initiatives) rather than by reading code. Returns ranked pages with a relevance snippet; " +
+        "initiatives) rather than by reading code. Returns ranked pages with a relevance snippet " +
+        "and a bounded source-query excerpt marked when truncated; " +
         // Same sentence the payload carries, from the same constant: two copies of a rule this
         // fiddly drift apart, and the description is what a host shows when the tool is listed.
         "read a full page with hindsight_read_knowledge_page. " +
@@ -233,11 +262,10 @@ export function buildKnowledgeTools(
             pages: hits.map((h) => ({
               page: h.name,
               page_id: h.id,
-              // The question the page answers — the same `description` the list and read tools
-              // carry, so a hit says what the page is FOR, not just how it opens.
-              ...(h.source_query ? { description: h.source_query } : {}),
+              ...navigationDescription(h.source_query),
               snippet: h.snippet,
             })),
+            read_hint: PAGE_READ_HINT,
             crediting,
           });
         } catch (e) {
@@ -250,18 +278,28 @@ export function buildKnowledgeTools(
       description:
         "List this repository's Hindsight knowledge pages — curated, continuously-updated " +
         "summaries of the project's durable knowledge (architecture, components, conventions, key " +
-        "decisions, and in-flight initiatives). Returns each page's id, title, and a one-line " +
-        "description of what it covers. Call this at the start of any non-trivial task, and again " +
+        "decisions, and in-flight initiatives). Returns each page's id, title, and a single-line " +
+        "source-query excerpt (at most 200 Unicode code points), with description_truncated and " +
+        "a full-read hint. Call this at the start of any non-trivial task, and again " +
         "periodically in long sessions, to see what the project already knows before you read code " +
         "or ask the user. The list changes as work is captured, so re-check it occasionally.",
       inputSchema: {},
       annotations: READ_ONLY_ANNOTATIONS,
-      handler: guarded(async () => client.listPages()),
+      handler: guarded(async () => {
+        const { items } = await client.listPages();
+        return {
+          items: items.map(({ description, ...page }) => ({
+            ...page,
+            ...navigationDescription(description),
+          })),
+          read_hint: PAGE_READ_HINT,
+        };
+      }),
     },
     {
       name: "hindsight_read_knowledge_page",
       description:
-        "Read the full content of one knowledge page by its id (from " +
+        "Read the full description/source query and content of one knowledge page by its id (from " +
         "hindsight_list_knowledge_pages). Call this whenever a listed page is relevant to what " +
         "you're about to do — e.g. read Conventions before writing new code, Component map before " +
         "changing a subsystem, or an initiative's page before continuing that feature. A page may " +
