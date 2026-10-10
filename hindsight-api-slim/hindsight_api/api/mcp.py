@@ -4,8 +4,16 @@ import json
 import logging
 import os
 from contextvars import ContextVar
+from dataclasses import dataclass
+from threading import Lock
+from typing import Any, cast
+from weakref import WeakSet
 
 from fastmcp import FastMCP
+from mcp.server.streamable_http import StreamableHTTPServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from pydantic import BaseModel, Field
+from starlette.types import Scope
 
 from hindsight_api import MemoryEngine
 from hindsight_api import __version__ as HINDSIGHT_VERSION
@@ -19,7 +27,8 @@ from hindsight_api.config import (
 from hindsight_api.engine.memory_engine import _current_schema
 from hindsight_api.extensions import MCPExtension, load_extension
 from hindsight_api.extensions.tenant import AuthenticationError
-from hindsight_api.mcp_tools import _ALL_TOOLS, MCPToolsConfig, register_mcp_tools
+from hindsight_api.mcp_profiles import TOOL_PROFILES, ToolProfile
+from hindsight_api.mcp_tools import _ALL_TOOLS, MCPToolsConfig, _apply_bank_tool_filtering, register_mcp_tools
 from hindsight_api.models import RequestContext
 from hindsight_api.recall_defaults import RecallDefaults
 
@@ -68,6 +77,17 @@ _current_mcp_authenticated: ContextVar[bool] = ContextVar("current_mcp_authentic
 # (HINDSIGHT_API_EXTENSION_PASSTHROUGH_HEADERS). Defaults to None rather than {}
 # so no single dict is shared as a default across requests.
 _current_extra_headers: ContextVar[dict[str, str] | None] = ContextVar("current_extra_headers", default=None)
+
+# A view, never an auth role. The middleware restores the stateful session's
+# initialization view on every request (SDK 2 propagates per-message context,
+# unlike SDK 1's inherited worker context). Stateless requests use their header.
+# Choose a different stateful view by initializing a new session.
+_current_tool_profile: ContextVar[ToolProfile | None] = ContextVar("current_tool_profile", default=None)
+
+
+def get_current_tool_profile() -> ToolProfile | None:
+    """The explicit HTTP MCP view, or None for backwards-compatible behavior."""
+    return _current_tool_profile.get()
 
 
 def get_current_bank_id() -> str | None:
@@ -201,15 +221,19 @@ def create_mcp_server(memory: MemoryEngine, multi_bank: bool = True) -> FastMCP:
             types=tuple(global_config.recall_default_types) if global_config.recall_default_types else None,
             prefer_observations=global_config.recall_default_prefer_observations,
         ),
+        tool_profile_resolver=get_current_tool_profile,
     )
 
-    register_mcp_tools(mcp, memory, config)
+    register_mcp_tools(mcp, memory, config, apply_tool_filtering=False)
 
     # Load and register additional tools from MCP extension if configured
     mcp_extension = load_extension("MCP", MCPExtension)
     if mcp_extension:
         logger.info(f"Loading MCP extension: {mcp_extension.__class__.__name__}")
         mcp_extension.register_tools(mcp, memory)
+
+    # Apply one filtering layer to the final registry, including extension tools.
+    _apply_bank_tool_filtering(mcp, memory, config)
 
     # Make all tools tolerant of extra arguments from LLMs (e.g., "explanation")
     _make_tools_tolerant(mcp)
@@ -338,6 +362,51 @@ def _coerce_string_json(arguments: dict, array_params: set[str], object_params: 
     return arguments
 
 
+@dataclass(frozen=True)
+class _SessionToolProfile:
+    profile: ToolProfile | None
+
+
+class _ProfileServerInfo(BaseModel):
+    name: str
+    version: str
+
+
+class _ProfileInitializeResult(BaseModel):
+    protocol_version: str = Field(alias="protocolVersion")
+    server_info: _ProfileServerInfo = Field(alias="serverInfo")
+    capabilities: dict[str, Any]
+
+
+class _ProfileInitializeResponse(BaseModel):
+    result: _ProfileInitializeResult | None = None
+
+
+def _is_successful_initialize(body: bytes) -> bool:
+    """Recognize the SDK's JSON or SSE initialize result, not HTTP success alone."""
+    payloads = [line[6:] for line in body.splitlines() if line.startswith(b"data: ")]
+    if not payloads:
+        payloads = [body]
+    for payload in payloads:
+        try:
+            if _ProfileInitializeResponse.model_validate_json(payload).result is not None:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _get_session_manager(app: Any) -> StreamableHTTPSessionManager | None:
+    # Both SDK generations keep the manager on their streamable HTTP ASGI route.
+    # Use its transports' lifetime, rather than a second SID registry/TTL that
+    # could forget a still-valid reader session and silently fall back to admin.
+    for route in getattr(app, "routes", ()):
+        manager = getattr(getattr(route, "app", None), "session_manager", None)
+        if isinstance(manager, StreamableHTTPSessionManager):
+            return manager
+    return None
+
+
 class MCPMiddleware:
     """ASGI middleware that intercepts MCP requests and routes to appropriate MCP server.
 
@@ -410,6 +479,42 @@ class MCPMiddleware:
             self.single_bank_server = create_mcp_server(memory, multi_bank=False)
             self.single_bank_app = self.single_bank_server.http_app(path="/", stateless_http=stateless)
 
+        self.multi_bank_session_manager = _get_session_manager(self.multi_bank_app)
+        self.single_bank_session_manager = _get_session_manager(self.single_bank_app)
+        self._profile_sessions: WeakSet[StreamableHTTPServerTransport] = WeakSet()
+        self._profile_session_lock = Lock()
+        self._pending_profile_sessions = 0
+
+    # No eviction: an explicit view that exceeds the cap must reconnect later,
+    # not lose its ceiling. Default/unprofiled sessions retain SDK behavior.
+    _MAX_PROFILE_SESSIONS = 10_000
+
+    def _reserve_profile_session(self) -> bool:
+        with self._profile_session_lock:
+            # Terminated transports may still be referenced by a closing stream.
+            # Remove them eagerly; weak references handle SDK expiry/shutdown too.
+            for transport in list(self._profile_sessions):
+                if transport.is_terminated:
+                    self._profile_sessions.discard(transport)
+            if len(self._profile_sessions) + self._pending_profile_sessions >= self._MAX_PROFILE_SESSIONS:
+                return False
+            self._pending_profile_sessions += 1
+            return True
+
+    def _bind_profile_session(self, transport: StreamableHTTPServerTransport, profile: ToolProfile | None) -> None:
+        # A scalar owned by the SDK transport disappears with that session. None
+        # is stored too, distinguishing legacy default sessions from unknown ones.
+        setattr(transport, "_hindsight_tool_profile", _SessionToolProfile(profile))
+        if profile is not None:
+            with self._profile_session_lock:
+                self._profile_sessions.add(transport)
+
+    def _forget_profile_session(self, transport: StreamableHTTPServerTransport) -> None:
+        with self._profile_session_lock:
+            self._profile_sessions.discard(transport)
+        if hasattr(transport, "_hindsight_tool_profile"):
+            delattr(transport, "_hindsight_tool_profile")
+
     def _get_header(self, scope: dict, name: str) -> str | None:
         """Extract a header value from ASGI scope."""
         name_lower = name.lower().encode()
@@ -417,6 +522,21 @@ class MCPMiddleware:
             if header_name.lower() == name_lower:
                 return header_value.decode()
         return None
+
+    def _get_tool_profile(self, scope: Scope) -> ToolProfile | None:
+        """Parse exactly one explicit view; malformed input never falls back."""
+        values = [value for name, value in scope.get("headers", []) if name.lower() == b"x-hindsight-tool-profile"]
+        if not values:
+            return None
+        if len(values) != 1:
+            raise ValueError("X-Hindsight-Tool-Profile must occur exactly once")
+        try:
+            profile = values[0].decode("ascii").strip()
+        except UnicodeDecodeError:
+            raise ValueError("X-Hindsight-Tool-Profile must be reader, curator or admin") from None
+        if profile not in TOOL_PROFILES:
+            raise ValueError("X-Hindsight-Tool-Profile must be reader, curator or admin")
+        return cast(ToolProfile, profile)
 
     def _get_extra_headers(self, scope: dict) -> dict[str, str]:
         """Collect the headers an operator opted into forwarding to extensions.
@@ -439,6 +559,12 @@ class MCPMiddleware:
         if not (path == self.prefix or path.startswith(self.prefix + "/")):
             # Not an MCP request — pass through to the inner app
             await self.app(scope, receive, send)
+            return
+
+        try:
+            tool_profile = self._get_tool_profile(scope)
+        except ValueError as e:
+            await self._send_error(send, 400, str(e))
             return
 
         # Handle GET-before-POST gracefully (Claude Code v2.1.84+ sends GET probe before POST initialize).
@@ -540,6 +666,50 @@ class MCPMiddleware:
         # - Path-based bank_id → single-bank app (no bank_id param, scoped tools)
         # - Header/env bank_id → multi-bank app (bank_id param, all tools)
         target_app = self.single_bank_app if bank_id_from_path else self.multi_bank_app
+        session_manager = self.single_bank_session_manager if bank_id_from_path else self.multi_bank_session_manager
+        # FastMCP 4 creates the manager during lifespan entry, not http_app().
+        if session_manager is None:
+            session_manager = _get_session_manager(target_app)
+        stateful = session_manager is not None and not session_manager.stateless
+        request_session_id = self._get_header(scope, "Mcp-Session-Id")
+        native_http_app = (
+            hasattr(target_app, "routes")
+            or (self.single_bank_server if bank_id_from_path else self.multi_bank_server) is not None
+        )
+        if session_manager is None and native_http_app and (tool_profile is not None or request_session_id is not None):
+            # Unknown SDK lifecycle surface must never turn a view-bound session
+            # into an unrestricted one. Legacy requests without a view/SID still
+            # go to the SDK unchanged; explicit views require supported lifecycle.
+            if schema_token is not None:
+                _current_schema.reset(schema_token)
+            await self._send_error(
+                send,
+                503,
+                "MCP tool-profile session manager unavailable; initialize a new session after compatibility is restored",
+            )
+            return
+        session_transport = (
+            session_manager._server_instances.get(request_session_id)
+            if stateful and request_session_id is not None
+            else None
+        )
+        if session_transport is not None and not session_transport.is_terminated:
+            binding = getattr(session_transport, "_hindsight_tool_profile", None)
+            if not isinstance(binding, _SessionToolProfile):
+                if schema_token is not None:
+                    _current_schema.reset(schema_token)
+                await self._send_error(send, 409, "MCP session has no tool-profile binding; initialize a new session")
+                return
+            if tool_profile is not None and tool_profile != binding.profile:
+                if schema_token is not None:
+                    _current_schema.reset(schema_token)
+                await self._send_error(
+                    send,
+                    400,
+                    "X-Hindsight-Tool-Profile is fixed for this session; initialize a new session to change it",
+                )
+                return
+            tool_profile = binding.profile
 
         # An alias is resolved here, where the id ENTERS the process, exactly as the
         # HTTP route class does for a routed path (see api/unknown_params.py). Doing
@@ -556,6 +726,17 @@ class MCPMiddleware:
         except Exception:
             logger.warning("Bank alias resolution failed for %r; using it as-is", bank_id, exc_info=True)
 
+        # Reserve only after alias lookup: cancellation during that await must
+        # not strand a view-capacity slot before the dispatch finally block.
+        reserved_profile_session = stateful and request_session_id is None and tool_profile is not None
+        if reserved_profile_session and not self._reserve_profile_session():
+            if schema_token is not None:
+                _current_schema.reset(schema_token)
+            await self._send_error(
+                send, 503, "MCP tool-profile session capacity reached; initialize a new session later"
+            )
+            return
+
         # Set bank_id, api_key, tenant_id, api_key_id, and mcp_authenticated context
         bank_id_token = _current_bank_id.set(bank_id)
         # Store the auth token for tenant extension to validate
@@ -567,6 +748,7 @@ class MCPMiddleware:
         mcp_auth_token = _current_mcp_authenticated.set(mcp_pre_authenticated)
         # Store the allowlisted passthrough headers so per-tool RequestContexts carry them
         extra_headers_token = _current_extra_headers.set(passthrough_headers)
+        tool_profile_token = _current_tool_profile.set(tool_profile)
         try:
             new_scope = scope.copy()
             new_scope["path"] = new_path
@@ -586,14 +768,39 @@ class MCPMiddleware:
             # Only rewrite SSE (text/event-stream) responses to avoid corrupting tool results
             # that might contain the literal string "data: /messages".
             is_sse_response = False
+            initializing_transport: StreamableHTTPServerTransport | None = None
+            initialize_body = b""
 
             async def send_wrapper(message):
-                nonlocal is_sse_response
+                nonlocal is_sse_response, initializing_transport, initialize_body
                 if message["type"] == "http.response.start":
+                    status = message["status"]
+                    if session_transport is not None and (
+                        status == 404 or (method == "DELETE" and 200 <= status < 300)
+                    ):
+                        self._forget_profile_session(session_transport)
+                    if stateful and request_session_id is None and method == "POST" and status == 200:
+                        response_session_id = self._get_header(message, "Mcp-Session-Id")
+                        if response_session_id:
+                            initializing_transport = session_manager._server_instances.get(response_session_id)
+
                     for header_name, header_value in message.get("headers", []):
                         if header_name == b"content-type" and b"text/event-stream" in header_value:
                             is_sse_response = True
                             break
+                if message["type"] == "http.response.body" and initializing_transport is not None:
+                    # Initialize replies are small (identity/capabilities, not tool
+                    # schemas). Bound buffering even if an SDK/extension misbehaves.
+                    body_chunk = message.get("body", b"")
+                    if len(initialize_body) + len(body_chunk) <= 65_536:
+                        initialize_body += body_chunk
+                        if _is_successful_initialize(initialize_body):
+                            self._bind_profile_session(initializing_transport, tool_profile)
+                            initializing_transport = None
+                            initialize_body = b""
+                    else:
+                        initializing_transport = None
+                        initialize_body = b""
                 if message["type"] == "http.response.body" and bank_id_from_path and is_sse_response:
                     body = message.get("body", b"")
                     if body and b"/messages" in body:
@@ -604,6 +811,9 @@ class MCPMiddleware:
 
             await target_app(new_scope, receive, send_wrapper)
         finally:
+            if reserved_profile_session:
+                with self._profile_session_lock:
+                    self._pending_profile_sessions -= 1
             _current_bank_id.reset(bank_id_token)
             if api_key_token is not None:
                 _current_api_key.reset(api_key_token)
@@ -613,6 +823,7 @@ class MCPMiddleware:
                 _current_api_key_id.reset(api_key_id_token)
             _current_mcp_authenticated.reset(mcp_auth_token)
             _current_extra_headers.reset(extra_headers_token)
+            _current_tool_profile.reset(tool_profile_token)
             if schema_token is not None:
                 _current_schema.reset(schema_token)
 

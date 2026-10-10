@@ -27,6 +27,7 @@ from hindsight_api.engine.memory_engine import KEEP_PARENT, Budget
 from hindsight_api.engine.response_models import VALID_RECALL_FACT_TYPES, MinScores, TemporalWindow
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
 from hindsight_api.extensions import OperationValidationError
+from hindsight_api.mcp_profiles import TOOL_PROFILES, ToolProfile
 from hindsight_api.models import RequestContext
 from hindsight_api.recall_defaults import RecallDefaults, resolve_recall_defaults
 
@@ -334,6 +335,10 @@ class MCPToolsConfig:
     # Appended last so existing positional construction keeps its meaning.
     extra_headers_resolver: Callable[[], dict[str, str]] | None = None
 
+    # HTTP-only, client-selected view. None preserves stdio and legacy HTTP behavior.
+    # Appended last to preserve existing positional construction.
+    tool_profile_resolver: Callable[[], ToolProfile | None] | None = None
+
     # Retain behavior
 
 
@@ -607,6 +612,8 @@ def register_mcp_tools(
     mcp: FastMCP,
     memory: MemoryEngine,
     config: MCPToolsConfig,
+    *,
+    apply_tool_filtering: bool = True,
 ) -> None:
     """Register MCP tools on a FastMCP server.
 
@@ -790,7 +797,10 @@ def register_mcp_tools(
     if "delete_knowledge_node" in tools_to_register:
         _register_delete_knowledge_node(mcp, memory, config)
 
-    _apply_bank_tool_filtering(mcp, memory, config)
+    # HTTP defers this until extensions have registered, so v2 run wrappers also
+    # cover extension tools. Stdio keeps the existing registration-time filter.
+    if apply_tool_filtering:
+        _apply_bank_tool_filtering(mcp, memory, config)
     _apply_audit_logging(mcp, memory, config)
 
 
@@ -801,33 +811,36 @@ def _apply_bank_tool_filtering(mcp: FastMCP, memory: MemoryEngine, config: MCPTo
     """
 
     async def _get_enabled_tools() -> set[str] | None:
-        """Return the enabled tool set for the current bank, or None if unrestricted."""
+        """Return the profile/bank/validator intersection, or None if unrestricted."""
+        profile = config.tool_profile_resolver() if config.tool_profile_resolver else None
+        profile_tools = TOOL_PROFILES[profile] if profile is not None else None
+        enabled: set[str] | None = set(profile_tools) if profile_tools is not None else None
         bank_id = await _resolve_bank(config, None)
         if not bank_id:
-            return None
+            # A missing bank cannot discard a client-selected finite ceiling.
+            return enabled
         request_context = _get_request_context(config)
 
-        # Layer 1: bank config filter (existing)
         bank_cfg = await memory._config_resolver.get_bank_config(bank_id, request_context)
         bank_tools: list[str] | None = bank_cfg.get("mcp_enabled_tools")
-        enabled: set[str] | None = set(bank_tools) if bank_tools is not None else None
+        if bank_tools is not None:
+            enabled = set(bank_tools) if enabled is None else enabled & set(bank_tools)
 
-        # Layer 2: operation validator filter
         validator = memory._operation_validator
         if validator is not None:
             candidate = frozenset(enabled) if enabled is not None else _ALL_TOOLS
             try:
                 filtered = await validator.filter_mcp_tools(bank_id, request_context, candidate)
             except Exception:
+                # Preserve the existing fail-open validator policy, but only
+                # within the already-computed profile and bank ceiling.
                 logger.warning("filter_mcp_tools raised, returning unfiltered tools", exc_info=True)
                 return enabled
             if filtered != candidate:
-                # Validator can only narrow, never expand beyond the bank config ceiling.
-                if bank_tools is not None:
-                    enabled = set(filtered) & set(bank_tools)
-                else:
-                    enabled = set(filtered)
+                enabled = set(filtered) & candidate
 
+        # The list/get wrappers intersect this with the actual registered tools;
+        # unregistered names cannot become visible or callable.
         return enabled
 
     if hasattr(mcp, "list_tools"):
@@ -2468,7 +2481,32 @@ def _register_clear_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MCP
 KNOWLEDGE_ROOT_PARENT = "root"
 
 
-def _knowledge_node_json(node: dict[str, Any]) -> dict[str, Any]:
+@dataclass(frozen=True)
+class _NavigationDescription:
+    description: str | None
+    description_truncated: bool
+    read_hint: str
+
+
+def _navigation_description(source_query: str | None, page_id: str) -> _NavigationDescription:
+    """Bound one navigation excerpt, never the full document or number of nodes."""
+    normalized = " ".join(source_query.split()) if source_query is not None else None
+    truncated = normalized is not None and len(normalized) > 200
+    return _NavigationDescription(
+        description=normalized[:199] + "…" if truncated else normalized,
+        description_truncated=truncated,
+        read_hint=(
+            f"Read the full description and document with get_knowledge_page(page_id={json.dumps(page_id)}). "
+            "Use the same bank as this navigation request."
+        ),
+    )
+
+
+def _compact_navigation(config: MCPToolsConfig) -> bool:
+    return config.tool_profile_resolver is not None and config.tool_profile_resolver() in {"reader", "curator"}
+
+
+def _knowledge_node_json(node: dict[str, Any], *, compact: bool = False) -> dict[str, Any]:
     """Project an engine node dict into the compact JSON an MCP client sees.
 
     Mirrors the HTTP ``KnowledgeNode`` projection, minus the fields an agent has
@@ -2486,6 +2524,11 @@ def _knowledge_node_json(node: dict[str, Any]) -> dict[str, Any]:
     if is_page:
         projected["mental_model_id"] = node.get("mental_model_id")
         projected["description"] = node.get("source_query")
+        if compact:
+            excerpt = _navigation_description(node.get("source_query"), node["id"])
+            projected["description"] = excerpt.description
+            projected["description_truncated"] = excerpt.description_truncated
+            projected["read_hint"] = excerpt.read_hint
         projected["tags"] = list(node.get("tags") or [])
         projected["timestamp"] = node.get("last_refreshed_at")
         if node.get("trigger") is not None:
@@ -2498,9 +2541,9 @@ def _knowledge_node_json(node: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def _knowledge_tree_json(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assemble the flat node list into nested roots (mirrors the HTTP tree)."""
-    projected = {n["id"]: _knowledge_node_json(n) for n in nodes}
+def _knowledge_tree_json(nodes: list[dict[str, Any]], *, compact: bool = False) -> list[dict[str, Any]]:
+    """Assemble all nodes; compact bounds descriptions, not tree size."""
+    projected = {n["id"]: _knowledge_node_json(n, compact=compact) for n in nodes}
     roots: list[dict[str, Any]] = []
     for node in nodes:
         parent_id = node.get("parent_id")
@@ -2514,15 +2557,21 @@ def _knowledge_tree_json(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def _do_get_knowledge_base_tree(
-    memory: MemoryEngine, target_bank: str, request_context: RequestContext
+    memory: MemoryEngine, target_bank: str, request_context: RequestContext, *, compact: bool = False
 ) -> dict[str, Any]:
     """Shared implementation for the get_knowledge_base_tree MCP tool variants."""
     nodes = await memory.list_knowledge_nodes(bank_id=target_bank, with_staleness=True, request_context=request_context)
-    return {"roots": _knowledge_tree_json(nodes)}
+    return {"roots": _knowledge_tree_json(nodes, compact=compact)}
 
 
 async def _do_search_knowledge_base(
-    memory: MemoryEngine, target_bank: str, request_context: RequestContext, *, query: str, limit: int
+    memory: MemoryEngine,
+    target_bank: str,
+    request_context: RequestContext,
+    *,
+    query: str,
+    limit: int,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """Shared implementation for the search_knowledge_base MCP tool variants.
 
@@ -2533,6 +2582,19 @@ async def _do_search_knowledge_base(
     results = await memory.search_knowledge_pages(
         bank_id=target_bank, query=query, limit=max(1, min(limit, 50)), request_context=request_context
     )
+    if compact:
+        # Engine rows may be cached/shared; copy them and replace only the source
+        # query. Ranking, snippets and the existing returned-hit total stay intact.
+        projected_results = []
+        for result in results:
+            excerpt = _navigation_description(result.get("source_query"), result["id"])
+            projected = dict(result)
+            if "source_query" in result:
+                projected["source_query"] = excerpt.description
+            projected["description_truncated"] = excerpt.description_truncated
+            projected["read_hint"] = excerpt.read_hint
+            projected_results.append(projected)
+        results = projected_results
     return {"results": results, "total": len(results)}
 
 
@@ -2680,7 +2742,9 @@ def _register_get_knowledge_base_tree(mcp: FastMCP, memory: MemoryEngine, config
     """Register the get_knowledge_base_tree tool."""
 
     async def _run(target_bank: str) -> Any:
-        return await _do_get_knowledge_base_tree(memory, target_bank, _get_request_context(config))
+        return await _do_get_knowledge_base_tree(
+            memory, target_bank, _get_request_context(config), compact=_compact_navigation(config)
+        )
 
     if config.include_bank_id_param:
 
@@ -2741,7 +2805,12 @@ def _register_search_knowledge_base(mcp: FastMCP, memory: MemoryEngine, config: 
 
     async def _run(target_bank: str, query: str, limit: int) -> Any:
         return await _do_search_knowledge_base(
-            memory, target_bank, _get_request_context(config), query=query, limit=limit
+            memory,
+            target_bank,
+            _get_request_context(config),
+            query=query,
+            limit=limit,
+            compact=_compact_navigation(config),
         )
 
     if config.include_bank_id_param:
