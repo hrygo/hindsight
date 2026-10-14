@@ -1,3 +1,4 @@
+import clsx from 'clsx';
 import React, {useMemo, useState, useCallback} from 'react';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import Link from '@docusaurus/Link';
@@ -6,8 +7,8 @@ import catalog from '@site/src/data/templates.json';
 import integrationsData from '@site/src/data/integrations.json';
 import styles from './index.module.css';
 
-const TEMPLATES_JSON_URL =
-  'https://github.com/vectorize-io/hindsight/edit/main/hindsight-docs/src/data/templates.json';
+const SUBMIT_TEMPLATE_URL =
+  'https://github.com/vectorize-io/hindsight/issues/new?template=feature_request.yml&title=Bank+template%3A+';
 
 // Webpack's require.context eagerly bundles every .json file under
 // src/data/templates/, so adding a template only requires creating
@@ -161,17 +162,17 @@ export default function TemplateGallery(): React.ReactElement {
 
   return (
     <Layout title="Bank Templates Hub" description="Pre-built bank templates for common use cases">
-      <div className={styles.heroSection}>
+      <div className={clsx('hs-hero-band', styles.heroSection)}>
         <h1 className={styles.heroTitle}>Bank Templates Hub</h1>
         <p className={styles.heroSubtitle}>
           Pre-built bank templates to get started fast. Browse, preview, and import into your Hindsight banks.
           {' '}<a href="/developer/api/bank-templates" className={styles.heroLink}>Learn how templates work &rarr;</a>
         </p>
 
-        <div className={styles.searchWrapper}>
+        <div className={styles.hubSearchWrapper}>
           <input
             type="text"
-            className={styles.searchInput}
+            className={styles.hubSearchInput}
             placeholder="Search templates..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -180,7 +181,7 @@ export default function TemplateGallery(): React.ReactElement {
             autoFocus
           />
           {search && (
-            <button className={styles.searchClear} onClick={() => setSearch('')} aria-label="Clear search">
+            <button className={styles.hubSearchClear} onClick={() => setSearch('')} aria-label="Clear search">
               &times;
             </button>
           )}
@@ -238,10 +239,10 @@ export default function TemplateGallery(): React.ReactElement {
           <div className={styles.submitBannerContent}>
             <h3 className={styles.submitBannerTitle}>Have a template to share?</h3>
             <p className={styles.submitBannerText}>
-              Contribute it to the community. Open a pull request and add your entry to the bank templates.
+              Share it with the community. Open an issue with your template and we will add it to the bank templates.
             </p>
             <Link
-              href={TEMPLATES_JSON_URL}
+              href={SUBMIT_TEMPLATE_URL}
               className={styles.submitButton}
               target="_blank"
               rel="noopener noreferrer">

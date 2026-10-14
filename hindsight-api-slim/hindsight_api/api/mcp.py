@@ -214,7 +214,9 @@ def create_mcp_server(memory: MemoryEngine, multi_bank: bool = True) -> FastMCP:
         mcp_authenticated_resolver=get_current_mcp_authenticated,  # Propagate MCP pre-auth flag
         extra_headers_resolver=get_current_extra_headers,  # Propagate allowlisted headers to extensions
         include_bank_id_param=multi_bank,
-        tools=base_tools,
+        # `set(...)`: the parameter declares a mutable set and `base_tools` is frozen. Copying is
+        # what the callee's declaration asks for, and it cannot then alias our constant.
+        tools=set(base_tools) if base_tools is not None else None,
         retain_description=retain_description,
         recall_description=recall_description,
         recall_defaults=RecallDefaults(
@@ -721,8 +723,16 @@ class MCPMiddleware:
         # before aliases existed.
         try:
             bank_id = await self.memory.resolve_bank_alias(
-                bank_id, request_context=RequestContext(api_key=auth_token, mcp_authenticated=mcp_pre_authenticated)
+                bank_id,
+                request_context=RequestContext(
+                    api_key=auth_token,
+                    mcp_authenticated=mcp_pre_authenticated,
+                    extra_headers=dict(passthrough_headers),
+                ),
             )
+        except AuthenticationError:
+            # Expected on unauthenticated requests: auth rejects them later anyway.
+            logger.debug("Bank alias resolution skipped for %r: not authenticated", bank_id)
         except Exception:
             logger.warning("Bank alias resolution failed for %r; using it as-is", bank_id, exc_info=True)
 

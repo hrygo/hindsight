@@ -72,10 +72,69 @@ def typesafe_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> It
             "HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY": "stub-key",
             "HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL": stub_server.url,
             "HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES": "true",
+            # HTTP only. Both servers share one database, so a worker here claims the OTHER
+            # server's queued work — every story's consolidation and refreshes — and runs it with
+            # this server's reranker, pruning by whatever cut level a TypeSafe story last set. The
+            # story then reads a result its own server never produced, and fails one run in a few
+            # depending on which worker polled first.
+            "HINDSIGHT_API_WORKER_ENABLED": "false",
         },
     )
     yield server
     server.stop()
+
+
+@pytest.fixture(scope="session")
+def scoped_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server whose operation validator confines each API key to ``user:<key>`` + ``kind:rule``.
+
+    The validator (``server_extensions/tag_scope_validator.py``) is server-level, so it costs
+    a process of its own. Session-scoped and started lazily, like ``typesafe_server``.
+    """
+    log_path: Path = tmp_path_factory.mktemp("scoped-server") / "server.log"
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=log_path,
+        extra_env={
+            "HINDSIGHT_API_OPERATION_VALIDATOR_EXTENSION": "tag_scope_validator:UserTagScope",
+            "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "server_extensions"),
+        },
+    )
+    yield server
+    server.stop()
+
+
+@pytest.fixture(scope="session")
+def retrying_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server that will actually re-ask the extraction model once.
+
+    ``stub_environment`` pins ``HINDSIGHT_API_LLM_MAX_RETRIES`` to 0 for every other
+    story, because a retry would double the stubbed calls and prove nothing. The
+    schema-drift recovery in #5280 lives *entirely* in the retry — the correction is
+    what the second attempt carries — so with no budget there is no second attempt and
+    the mechanism cannot be observed at all. The budget is server-level (it is not in
+    ``_CONFIGURABLE_FIELDS``), hence a process rather than a bank setting. Scoped to
+    retain, so recall, reflect and consolidation keep the suite's zero-retry rule.
+
+    The worker stays enabled, unlike ``typesafe_server``: the only difference here is
+    how many times a drifted extraction may be re-asked, and a story that never drifts
+    is unaffected by this worker claiming its queued work.
+    """
+    log_path: Path = tmp_path_factory.mktemp("retrying-server") / "server.log"
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=log_path,
+        extra_env={"HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES": "1"},
+    )
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+async def retrying_client(retrying_server) -> AsyncIterator[Hindsight]:
+    client = Hindsight(base_url=retrying_server.url)
+    yield client
+    await client.aclose()
 
 
 @pytest.fixture

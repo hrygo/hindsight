@@ -50,8 +50,21 @@ export const CODING_AGENT_HARNESSES: CodingAgentHarness[] = [
   {id: 'pi', label: 'pi', file: 'pi.svg'},
   {id: 'prime-agent', label: 'Prime Agent', file: 'prime-agent.svg'},
   {id: 'dsh', label: 'DeepSeek Harness', file: 'dsh.svg'},
+  {id: 'workbuddy', label: 'WorkBuddy', file: 'workbuddy.png'},
+  {id: 'codebuddy', label: 'CodeBuddy', file: 'codebuddy.png'},
 ];
 
 /** Public path of a harness icon, for surfaces that want the URL rather than the file name. */
 export const harnessIconPath = (harness: CodingAgentHarness): string =>
   `/img/harness/${harness.file}`;
+
+/**
+ * Deep link to a harness's install section on the Coding Agents page.
+ *
+ * Docusaurus slugs those headings from their text, and the `<img>` each one opens with contributes a
+ * leading space — hence the `-` prefix on an otherwise ordinary slug. The integration's
+ * `src/docs-harness-roster.test.ts` asserts a `#### <img …/> <label>` section exists for every entry
+ * here, so the target of this link cannot quietly disappear.
+ */
+export const harnessDocLink = (harness: CodingAgentHarness): string =>
+  `/sdks/integrations/coding-agents#-${harness.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;

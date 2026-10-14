@@ -33,7 +33,7 @@ Case fields
                   indiscriminate as ``user`` is on a real bank), ``kind``.
 ``other_bank``    entities seeded into a *different* bank, which must never be reachable.
 ``mentions``      the entities extracted from ONE fact, so they are each other's
-                  ``nearby_entities`` — which is what retain passes (``retain/link_utils.py``).
+                  ``nearby_entities`` — which is what retain passes (``memories/pg/links.py``).
                   A bystander that is not itself a mention would not be in the trigram
                   strategy's candidate set, so its co-occurrences would not count and the
                   case would measure something production never does.
@@ -54,7 +54,7 @@ import pytest
 
 from hindsight_api.config import get_config
 from hindsight_api.engine.db import create_database_backend
-from hindsight_api.engine.entity_resolver import EntityResolver
+from hindsight_api.engine.memories.pg.entity_resolver import EntityResolver
 from hindsight_api.pg0 import resolve_database_url
 
 EVENT_DATE = datetime(2026, 6, 1, tzinfo=UTC)
@@ -238,7 +238,7 @@ async def test_entity_resolution_case(case: Case, strategy: str, pg0_db_url):
             # fewer candidates than production does.
             await conn.execute(
                 "SELECT set_config('pg_trgm.similarity_threshold', $1, false)",
-                str(config.entity_trgm_similarity_threshold),
+                str(config.entity_trgm_probe_threshold),
             )
             await _seed(conn, bank_id, case.existing)
             await _seed(conn, other_bank_id, case.other_bank)

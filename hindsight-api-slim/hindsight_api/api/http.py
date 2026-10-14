@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from hindsight_api import MemoryEngine
 from hindsight_api.config import RETAIN_EXTRACTION_MODES
@@ -211,11 +211,13 @@ def FieldWithDefault(default_factory: Callable, **kwargs) -> Any:
     return Field(default_factory=default_factory, json_schema_extra=json_extra, **kwargs)
 
 
-from hindsight_api.config import HindsightConfig, StaticConfigProxy, get_config
+from hindsight_api.config import ConfigLike, HindsightConfig, StaticConfigProxy, get_config
 from hindsight_api.engine.interface import BankTemplateImportWrite
+from hindsight_api.engine.memories.base import StoreWriteUnavailable
 from hindsight_api.engine.memory_engine import (
     KEEP_PARENT,
     Budget,
+    KnowledgeTagFilter,
     RetainOperationConflictError,
     VisionNotSupportedError,
     _current_schema,
@@ -250,9 +252,38 @@ from hindsight_api.engine.retain.attachment_content import (
 from hindsight_api.engine.retain.attachment_store import StoredAttachment
 from hindsight_api.engine.search.tag_resolution import needs_resolution
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
+
+_TAG_GROUPS_ADAPTER: TypeAdapter[list[TagGroup]] = TypeAdapter(list[TagGroup])
+
+_TAG_GROUPS_QUERY_DESCRIPTION = (
+    "Compound tag filter as a JSON-encoded list of tag groups — the same shape `tag_groups` takes in a "
+    "recall body (leaves {tags, match, resolve} and {and: [...]}, {or: [...]}, {not: ...}; groups are "
+    "AND-ed). Mutually exclusive with `tags`."
+)
+
+
+def _parse_tag_groups_query(raw: str | None, tags: list[str] | None) -> list[TagGroup] | None:
+    """Parse a ``tag_groups`` query parameter.
+
+    A GET cannot carry a body, so the tree that recall takes as JSON arrives as a
+    JSON-encoded string. Invalid JSON or an invalid tree is a 400, and so is sending it
+    alongside ``tags`` — the same rule recall enforces on its body.
+    """
+    if raw is None:
+        return None
+    if tags:
+        raise HTTPException(
+            status_code=400,
+            detail="'tags' and 'tag_groups' are mutually exclusive. Use 'tag_groups' for compound filtering.",
+        )
+    try:
+        return _TAG_GROUPS_ADAPTER.validate_json(raw)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid tag_groups: {e.errors(include_url=False)}")
+
+
 from hindsight_api.engine.structured_output import validate_response_schema
 from hindsight_api.engine.time_filter import DocumentTimeField, MemoryTimeField
-from hindsight_api.engine.token_encoding import count_tokens
 from hindsight_api.extensions import HttpExtension, OperationValidationError, load_extension
 from hindsight_api.liveness import LivenessResponse, liveness_response
 from hindsight_api.metrics import (
@@ -283,8 +314,38 @@ def _internal_error(exc: Exception, where: str) -> HTTPException:
     ``raise _internal_error(e, ...)`` and keep the ``raise`` visible at the
     handler instead of hidden behind a call.
     """
+    unavailable = _store_unavailable(exc)
+    if unavailable is not None:
+        logger.warning(f"Store unavailable in {where}, answering 503: {exc}")
+        return unavailable
     logger.error(f"Error in {where}: {exc}\n\nTraceback:\n{traceback.format_exc()}")
     return HTTPException(status_code=500, detail=str(exc))
+
+
+def _store_unavailable(exc: BaseException) -> HTTPException | None:
+    """The 503 for a store that shed this request, or None if it did not.
+
+    A store that cannot take a request *right now* — a bank briefly closed to writes, or indexing
+    that has fallen behind its writers — raises :class:`StoreWriteUnavailable`. The app-level
+    handler turns it into 503 + ``Retry-After``, but only when it escapes the route; every route's
+    catch-all caught it first and answered 500, which tells a client the request is broken. A bulk
+    ingest that stops on a 500 silently loses the rest of what it was writing.
+
+    Walks the cause/context chain because the engine usually wraps the store's error before a route
+    sees it.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, StoreWriteUnavailable):
+            return HTTPException(
+                status_code=503,
+                detail=str(cur),
+                headers={"Retry-After": str(cur.retry_after)},
+            )
+        cur = cur.__cause__ or cur.__context__
+    return None
 
 
 def _parse_iso_datetime(value: str | None, param: str) -> datetime | None:
@@ -370,6 +431,55 @@ async def run_cancellable_on_disconnect(
     except OperationCancelledError as e:
         logger.info(f"[{operation.upper()} CANCELLED] bank={bank_id} reason={e.reason}")
         raise HTTPException(status_code=_CLIENT_CLOSED_REQUEST_STATUS_CODE, detail=e.reason) from e
+
+
+async def run_task_cancellable_on_disconnect(
+    http_request: Request,
+    coro: Awaitable[_T],
+    *,
+    operation: str,
+    bank_id: str,
+) -> _T:
+    """Run a coroutine as a task and cancel it outright if the client disconnects.
+
+    The cooperative variant above is the right shape for recall and reflect, whose
+    expensive stages run in worker threads that task cancellation cannot interrupt.
+    A synchronous retain is the opposite shape: almost all of its wall time is spent
+    *awaiting* — queued on the LLM concurrency semaphore, then on the provider's
+    response — so a checkpoint between stages never gets a turn, and only real task
+    cancellation unblocks it. An abandoned sync retain measured 1880s, holding an LLM
+    slot the whole way and committing into a bank that had been deleted meanwhile
+    (issue #4526).
+
+    Cancelling retain mid-flight is a path the pipeline already handles: the worker
+    runs every retain under an absolute ``asyncio.timeout`` ceiling, and the
+    orchestrator's ``finally`` blocks commit what earlier sub-batches produced and
+    stop the in-flight extraction tasks.
+    """
+    token = get_scope_cancellation_token(http_request.scope)
+    if token is None:
+        return await coro
+    task = asyncio.ensure_future(coro)
+    waiter = asyncio.ensure_future(token.wait())
+    try:
+        done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            return task.result()
+        task.cancel()
+        # Awaited, not abandoned: the unwinding task still commits partial work and
+        # tears down its own subtasks, and anything it raises on the way out is the
+        # cancellation, not a fault worth reporting over the 499.
+        await asyncio.gather(task, return_exceptions=True)
+        logger.info(f"[{operation.upper()} CANCELLED] bank={bank_id} reason={token.reason}")
+        raise HTTPException(status_code=_CLIENT_CLOSED_REQUEST_STATUS_CODE, detail=token.reason)
+    finally:
+        waiter.cancel()
+        # This call can itself be cancelled from above (server shutdown, a deadline),
+        # and `asyncio.wait` does not propagate that to what it was waiting on —
+        # leaving the retain running with nobody to answer, the very thing this
+        # helper exists to stop. Already done on the disconnect path above.
+        if not task.done():
+            task.cancel()
 
 
 class EntityIncludeOptions(BaseModel):
@@ -997,7 +1107,7 @@ def canonicalize_item_content(
     content: Content,
     *,
     item_index: int,
-    config: HindsightConfig,
+    config: ConfigLike,
     allowed_attachment_ids: "set[str] | None" = None,
 ) -> CanonicalContent:
     """Flatten a retain item's content to the canonical text the pipeline stores.
@@ -1070,7 +1180,9 @@ class MemoryItem(BaseModel):
     document_id: str | None = Field(
         default=None,
         description="Optional document ID for this memory item. Provide a distinct document_id per source "
-        "document — items sharing a document_id are grouped into the same document. Auto-generated when omitted.",
+        "document — items sharing a document_id are grouped into the same document. Auto-generated when omitted: "
+        "if no item in the request has one, they all share one generated document (a request split into "
+        "parts for size gets one per part); otherwise each item without one gets its own.",
     )
     entities: list[EntityInput] | None = Field(
         default=None,
@@ -3580,6 +3692,34 @@ def _knowledge_node_model(node: dict[str, Any]) -> KnowledgeNode:
     )
 
 
+def _knowledge_tag_filter(
+    tags: list[str] | None = Query(
+        None,
+        description="Only return pages carrying these tags (matched per `tags_match`, like recall).",
+    ),
+    tags_match: TagsMatch = Query(
+        "any",
+        description="How `tags` match a page's tags: any, all, any_strict, all_strict, exact. "
+        "'any'/'all' also return untagged pages; the _strict modes and 'exact' do not.",
+    ),
+    tag_groups: str | None = Query(
+        None,
+        description="JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. "
+        '`[{"or":[{"tags":["user:kate"],"match":"all_strict"},{"tags":["team"]}]}]`. '
+        "Top-level groups are AND-ed, and AND-ed with `tags`.",
+    ),
+) -> KnowledgeTagFilter:
+    """Query-string tag filter shared by the knowledge-base tree and search."""
+    try:
+        groups = _TAG_GROUPS_ADAPTER.validate_json(tag_groups) if tag_groups else None
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid tag_groups: {e}")
+    return KnowledgeTagFilter(tags=tags or None, tags_match=tags_match, tag_groups=groups)
+
+
+_TAG_GROUPS_ADAPTER: TypeAdapter[list[TagGroup]] = TypeAdapter(list[TagGroup])
+
+
 def _build_knowledge_tree(nodes: list[dict[str, Any]]) -> list[KnowledgeNode]:
     """Assemble the flat node list into a nested tree of roots."""
     models = {n["id"]: _knowledge_node_model(n) for n in nodes}
@@ -4163,7 +4303,7 @@ async def apply_bank_template_manifest(
             provisioned = await memory.list_mental_models(
                 bank_id=bank_id,
                 limit=None,
-                detail="metadata",
+                detail="config",
                 request_context=request_context,
             )
             existing_by_id = {item["id"]: item for item in provisioned.items}
@@ -4224,7 +4364,7 @@ async def apply_default_bank_template_resources(
     existing_by_id: dict[str, dict[str, Any]] = {}
     if manifest.mental_models:
         existing = await memory.list_mental_models(
-            bank_id=bank_id, limit=None, detail="metadata", request_context=request_context
+            bank_id=bank_id, limit=None, detail="config", request_context=request_context
         )
         existing_by_id = {model["id"]: model for model in existing.items}
 
@@ -4249,6 +4389,37 @@ async def apply_default_bank_template_resources(
     )
 
 
+def _mental_model_matches_template(stored: dict[str, Any], mm: "BankTemplateMentalModel") -> bool:
+    """True when re-applying ``mm`` would leave the stored model as it is.
+
+    Mirrors what the update writes: empty manifest tags leave the stored tags
+    alone, so they never count as a difference. The stored trigger goes through
+    ``MentalModelTrigger`` so its unset fields get the same defaults as the
+    manifest's; one that no longer parses counts as changed.
+    """
+    try:
+        stored_trigger = MentalModelTrigger.model_validate(stored["trigger"] or {})
+    except ValidationError:
+        return False
+    return (
+        stored["name"] == mm.name
+        and stored["source_query"] == mm.source_query
+        and stored["max_tokens"] == mm.max_tokens
+        and (not mm.tags or set(stored["tags"]) == set(mm.tags))
+        and stored_trigger == mm.trigger
+    )
+
+
+def _directive_matches_template(stored: dict[str, Any], directive: "BankTemplateDirective") -> bool:
+    """True when re-applying ``directive`` would leave the stored one as it is."""
+    return (
+        stored["content"] == directive.content
+        and stored["priority"] == directive.priority
+        and stored["is_active"] == directive.is_active
+        and (not directive.tags or set(stored["tags"]) == set(directive.tags))
+    )
+
+
 async def _apply_bank_template_resources(
     memory: MemoryEngine,
     bank_id: str,
@@ -4267,6 +4438,10 @@ async def _apply_bank_template_resources(
     if manifest.mental_models:
         for mm in manifest.mental_models:
             if mm.id in existing_mental_models:
+                # Unchanged: skip it, or every re-apply of the same manifest would
+                # regenerate the model with an LLM call for nothing (#5271).
+                if _mental_model_matches_template(existing_mental_models[mm.id], mm):
+                    continue
                 await memory.update_mental_model(
                     bank_id=bank_id,
                     mental_model_id=mm.id,
@@ -4310,6 +4485,8 @@ async def _apply_bank_template_resources(
     if manifest.directives:
         for directive in manifest.directives:
             if directive.name in existing_directives:
+                if _directive_matches_template(existing_directives[directive.name], directive):
+                    continue
                 await memory.update_directive(
                     bank_id=bank_id,
                     directive_id=existing_directives[directive.name]["id"],
@@ -5012,7 +5189,9 @@ def create_app(
             # Convert default schema to None for SQL compatibility (no schema prefix)
             schema = None if config.database_schema == DEFAULT_DATABASE_SCHEMA else config.database_schema
             poller = WorkerPoller(
-                backend=memory._backend,
+                # Not `_backend` directly: it is Optional only because `close()` clears it, and
+                # this runs while the engine is live.
+                backend=memory._require_backend(),
                 worker_id=worker_id,
                 executor=memory.execute_task,
                 poll_interval_ms=config.worker_poll_interval_ms,
@@ -5355,9 +5534,11 @@ def _register_routes(app: FastAPI):
             if controller is None:
                 yield
                 return
-            # Recall and reflect carry a disconnect token (see api/disconnect.py). A
-            # queued request whose client has gone gives up its place immediately,
-            # which is what makes a patient deadline affordable.
+            # Recall, reflect and the retain POST carry a disconnect token (see
+            # api/disconnect.py). A queued request whose client has gone gives up its
+            # place immediately, which is what makes a patient deadline affordable.
+            # Retain joined them in #4526: before that its lane kept the place of a
+            # caller that had already hung up, because this returned None for it.
             abandoned = get_scope_cancellation_token(request.scope)
             try:
                 async with controller.admit(str(operation), abandoned=abandoned):
@@ -5454,8 +5635,6 @@ def _register_routes(app: FastAPI):
     # A bank briefly closed to writes — a store migrating it between backends holds it for a few
     # seconds. 503 + Retry-After rather than a 500: nothing is broken, and the difference decides
     # whether a client retries or reports a failure to the user.
-    from ..engine.memories.base import StoreWriteUnavailable
-
     @app.exception_handler(StoreWriteUnavailable)
     async def store_write_unavailable_handler(request, exc: StoreWriteUnavailable):
         return JSONResponse(
@@ -5532,6 +5711,11 @@ def _register_routes(app: FastAPI):
         tags=["Monitoring"],
         operation_id="get_version",
     )
+    # Same handler under /v1, kept out of the OpenAPI spec (it is an alias, not a new operation).
+    # A reverse proxy that routes only /v1 to the API — the Helm chart's default ingress does —
+    # sends a bare /version to the control plane instead, so clients probing capabilities there
+    # silently saw "unsupported" (#5286). Clients try this path first.
+    @app.get("/v1/version", response_model=VersionResponse, include_in_schema=False)
     async def version_endpoint() -> VersionResponse:
         """
         Get API version and enabled features.
@@ -6026,16 +6210,6 @@ def _register_routes(app: FastAPI):
             if _deps_done:
                 metrics.record_recall_phase("body_parse", max(0.0, handler_start - _deps_done))
 
-        # Validate query length to prevent expensive operations on oversized queries
-        max_query_tokens = get_config().recall_max_query_tokens
-        if max_query_tokens > 0:  # 0 (or negative) disables the cap
-            query_tokens = count_tokens(request.query)
-            if query_tokens > max_query_tokens:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Query too long: {query_tokens} tokens exceeds maximum of {max_query_tokens}. Please shorten your query.",
-                )
-
         try:
             config = get_config()
             resolved_types, resolved_prefer = resolve_recall_defaults(
@@ -6232,6 +6406,8 @@ def _register_routes(app: FastAPI):
                 detail="Request timed out while searching memories. Try a shorter or more specific query.",
             )
         except Exception as e:
+            if (unavailable := _store_unavailable(e)) is not None:
+                raise unavailable
             import traceback
 
             handler_duration = time.time() - handler_start
@@ -6409,6 +6585,9 @@ def _register_routes(app: FastAPI):
             # evidence it was asked for. Answering anyway would return a confident
             # reply built on a partial (often empty) evidence set, which callers
             # store as a real answer (#2894). Returning the failure lets them retry.
+            # A tool whose recall the store shed is "not now", so it gets the same 503 as recall.
+            if (unavailable := _store_unavailable(e)) is not None:
+                raise unavailable
             logger.warning("Reflect retrieval failure in bank %s: %s", bank_id, e)
             raise HTTPException(status_code=500, detail=str(e))
         except TimeoutError as e:
@@ -6589,12 +6768,27 @@ def _register_routes(app: FastAPI):
         bank_id: str,
         limit: int = Query(default=100, ge=0, description="Maximum number of entities to return"),
         offset: int = Query(default=0, ge=0, description="Offset for pagination"),
+        tags: list[str] | None = Query(
+            default=None,
+            description=(
+                "Only count memories carrying these tags. An entity is returned only when a matching "
+                "memory mentions it, and its mention count and dates cover the matching memories only."
+            ),
+        ),
+        tags_match: TagsMatch = Query(default="any", description="How `tags` match (same modes as listing memories)."),
+        tag_groups: str | None = Query(default=None, description=_TAG_GROUPS_QUERY_DESCRIPTION),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """List entities for a memory bank with pagination."""
         try:
             data = await app.state.memory.list_entities(
-                bank_id, limit=limit, offset=offset, request_context=request_context
+                bank_id,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=_parse_tag_groups_query(tag_groups, tags),
+                limit=limit,
+                offset=offset,
+                request_context=request_context,
             )
             return EntityListResponse(
                 items=[EntityListItem(**e) for e in data["items"]],
@@ -6622,12 +6816,27 @@ def _register_routes(app: FastAPI):
         bank_id: str,
         limit: int = Query(default=1000, ge=0, description="Maximum number of co-occurrence edges to return"),
         min_count: int = Query(default=1, description="Minimum cooccurrence_count to include an edge"),
+        tags: list[str] | None = Query(
+            default=None,
+            description=(
+                "Only count memories carrying these tags. Edges and node mention counts are "
+                "computed from the matching memories only."
+            ),
+        ),
+        tags_match: TagsMatch = Query(default="any", description="How `tags` match (same modes as listing memories)."),
+        tag_groups: str | None = Query(default=None, description=_TAG_GROUPS_QUERY_DESCRIPTION),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """Return entity co-occurrence graph for a bank."""
         try:
             return await app.state.memory.get_entity_graph(
-                bank_id, limit=limit, min_count=min_count, request_context=request_context
+                bank_id,
+                limit=limit,
+                min_count=min_count,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=_parse_tag_groups_query(tag_groups, tags),
+                request_context=request_context,
             )
         except OperationValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.reason)
@@ -6645,11 +6854,29 @@ def _register_routes(app: FastAPI):
         tags=["Entities"],
     )
     async def api_get_entity(
-        bank_id: str, entity_id: str, request_context: RequestContext = Depends(get_request_context)
+        bank_id: str,
+        entity_id: str,
+        tags: list[str] | None = Query(
+            default=None,
+            description=(
+                "Only count memories carrying these tags. The entity is a 404 when no matching memory "
+                "mentions it; its mention count and dates cover the matching memories only."
+            ),
+        ),
+        tags_match: TagsMatch = Query(default="any", description="How `tags` match (same modes as listing memories)."),
+        tag_groups: str | None = Query(default=None, description=_TAG_GROUPS_QUERY_DESCRIPTION),
+        request_context: RequestContext = Depends(get_request_context),
     ):
         """Get entity details with observations."""
         try:
-            entity = await app.state.memory.get_entity(bank_id, entity_id, request_context=request_context)
+            entity = await app.state.memory.get_entity(
+                bank_id,
+                entity_id,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=_parse_tag_groups_query(tag_groups, tags),
+                request_context=request_context,
+            )
 
             if entity is None:
                 raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found")
@@ -7093,12 +7320,13 @@ def _register_routes(app: FastAPI):
     )
     async def api_knowledge_base_tree(
         bank_id: str,
+        tag_filter: KnowledgeTagFilter = Depends(_knowledge_tag_filter),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """Return the folder/page tree for a bank."""
         try:
             nodes = await app.state.memory.list_knowledge_nodes(
-                bank_id=bank_id, with_staleness=True, request_context=request_context
+                bank_id=bank_id, with_staleness=True, tag_filter=tag_filter, request_context=request_context
             )
             return KnowledgeTreeResponse(roots=_build_knowledge_tree(nodes))
         except OperationValidationError as e:
@@ -7252,12 +7480,13 @@ def _register_routes(app: FastAPI):
         bank_id: str,
         q: str = Query(..., description="Search query", min_length=1),
         limit: int = Query(10, ge=1, le=50, description="Maximum results to return"),
+        tag_filter: KnowledgeTagFilter = Depends(_knowledge_tag_filter),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """Return knowledge pages ranked by fused BM25 + vector relevance."""
         try:
             results = await app.state.memory.search_knowledge_pages(
-                bank_id=bank_id, query=q, limit=limit, request_context=request_context
+                bank_id=bank_id, query=q, limit=limit, tag_filter=tag_filter, request_context=request_context
             )
             return KnowledgePageSearchResponse(
                 results=[KnowledgePageSearchResult(**r) for r in results],
@@ -8601,6 +8830,9 @@ def _register_routes(app: FastAPI):
             profile = await app.state.memory.get_bank_profile(bank_id, request_context=request_context)
             if profile is None:
                 raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' not found")
+            # The template carries the bank's whole config: an admin export, not narrowed
+            # to a tag scope, so scoped callers are refused like the full bank export.
+            await app.state.memory._refuse_bank_wide_if_scoped(bank_id, request_context, "export the bank template")
 
             # Get bank-specific config overrides (not the fully resolved config,
             # so the template only contains what was explicitly set on this bank)
@@ -9501,6 +9733,7 @@ def _register_routes(app: FastAPI):
                 bank_id=bank_id,
                 request_context=request_context,
                 observation_scopes=observation_scopes,
+                caller_requested=True,
             )
             return ConsolidationResponse(
                 operation_id=result["operation_id"],
@@ -9855,6 +10088,7 @@ def _register_routes(app: FastAPI):
     async def api_retain(
         bank_id: str,
         request: RetainRequest,
+        http_request: Request,
         request_context: RequestContext = Depends(get_request_context),
         _precheck: None = Depends(precheck_for(PrecheckOperation.RETAIN)),
         _admit: None = Depends(admit_for(PrecheckOperation.RETAIN)),
@@ -10023,9 +10257,14 @@ def _register_routes(app: FastAPI):
                 # Synchronous processing: one batch per strategy group, aggregate results
                 total_items_count = 0
                 total_usage = TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0)
-                with metrics.record_operation("retain", bank_id=bank_id, source="api"):
+
+                # A coroutine rather than an inline loop so the whole thing can be run
+                # as one cancellable task below; the totals stay in the enclosing scope
+                # because the response is built from them.
+                async def _retain_groups() -> None:
+                    nonlocal total_items_count, total_usage
                     for group_strategy, contents in strategy_groups.items():
-                        result, usage = await app.state.memory.retain_batch_async(
+                        _, usage = await app.state.memory.retain_batch_async(
                             bank_id=bank_id,
                             contents=contents,
                             document_tags=request.document_tags,
@@ -10046,6 +10285,19 @@ def _register_routes(app: FastAPI):
                                 output_tokens=total_usage.output_tokens + usage.output_tokens,
                                 total_tokens=total_usage.total_tokens + usage.total_tokens,
                             )
+
+                with metrics.record_operation("retain", bank_id=bank_id, source="api"):
+                    # A sync retain has no operation row and no ack, so nothing else can
+                    # stop it once it starts: without this an abandoned one runs to
+                    # completion, holding an LLM slot and committing work nobody will
+                    # read (issue #4526). The async path is unaffected — it returns
+                    # before any extraction runs, and DELETE /operations/{id} stops it.
+                    await run_task_cancellable_on_disconnect(
+                        http_request,
+                        _retain_groups(),
+                        operation="retain",
+                        bank_id=bank_id,
+                    )
 
                 return RetainResponse.model_validate(
                     {
@@ -10083,6 +10335,8 @@ def _register_routes(app: FastAPI):
                     status_code=422,
                     detail={"violations": [asdict(v) for v in e.violations]},
                 )
+            if (unavailable := _store_unavailable(e)) is not None:
+                raise unavailable
             import traceback
 
             # Create a summary of the input for debugging

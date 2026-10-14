@@ -22,7 +22,7 @@ jobs:
       clients-rust: ${{ steps.filter.outputs.clients-rust }}
       clients-go: ${{ steps.filter.outputs.clients-go }}
       control-plane: ${{ steps.filter.outputs.control-plane }}
-      interfig: ${{ steps.filter.outputs.interfig }}
+      figures: ${{ steps.filter.outputs.figures }}
       cli: ${{ steps.filter.outputs.cli }}
       docker: ${{ steps.filter.outputs.docker }}
       helm: ${{ steps.filter.outputs.helm }}
@@ -80,13 +80,13 @@ jobs:
       integrations-dify: ${{ steps.filter.outputs.integrations-dify }}
       integrations-gemini-spark: ${{ steps.filter.outputs.integrations-gemini-spark }}
       integrations-meta-muse: ${{ steps.filter.outputs.integrations-meta-muse }}
+      integrations-grok-bot: ${{ steps.filter.outputs.integrations-grok-bot }}
       integrations-vapi: ${{ steps.filter.outputs.integrations-vapi }}
       integrations-flowise: ${{ steps.filter.outputs.integrations-flowise }}
       integrations-google-adk: ${{ steps.filter.outputs.integrations-google-adk }}
       integrations-obsidian: ${{ steps.filter.outputs.integrations-obsidian }}
       integrations-omo: ${{ steps.filter.outputs.integrations-omo }}
       integrations-haystack: ${{ steps.filter.outputs.integrations-haystack }}
-      tools-agent-sdk: ${{ steps.filter.outputs.tools-agent-sdk }}
       integrations-roo-code: ${{ steps.filter.outputs.integrations-roo-code }}
       dev: ${{ steps.filter.outputs.dev }}
       ci: ${{ steps.filter.outputs.ci }}
@@ -139,9 +139,11 @@ jobs:
             # Same reason as clients-rust above: the CLI compiles against the
             # progenitor-generated client, so an OpenAPI change alone can break it.
             - 'hindsight-docs/static/openapi.json'
-          interfig:
-            - 'hindsight-interfig/**'
+          figures:
+            - 'hindsight-docs/figures/**'
             - 'scripts/docs_skill_figures.py'
+            # The Giotto pin lives here: a new Giotto can stop a figure from drawing.
+            - 'hindsight-docs/package.json'
           docker:
             - 'docker/**'
           helm:
@@ -281,6 +283,10 @@ jobs:
             - 'hindsight-integrations/gemini-spark/**'
           integrations-meta-muse:
             - 'hindsight-integrations/meta-muse/**'
+          integrations-grok-bot:
+            - 'hindsight-integrations/grok-bot/**'
+            - '.cursor-plugin/**'
+            - 'hindsight-api-slim/hindsight_api/mcp_tools.py'
           integrations-vapi:
             - 'hindsight-integrations/vapi/**'
           integrations-flowise:
@@ -291,12 +297,11 @@ jobs:
             - 'hindsight-integrations/obsidian/**'
           integrations-omo:
             - 'hindsight-integrations/omo/**'
-          tools-agent-sdk:
-            - 'hindsight-tools/hindsight-agent-sdk/**'
           integrations-roo-code:
             - 'hindsight-integrations/roo-code/**'
           dev:
             - 'hindsight-dev/**'
+            - 'scripts/dev/**'
           ci:
             - '.github/**'
 
@@ -322,6 +327,51 @@ jobs:
 
     - name: Check integration lockfiles resolve from the npm registry
       run: ./scripts/check-integration-lockfiles.sh
+
+  typecheck-api:
+    # `ty check` over hindsight-api-slim. Green today, and it stays green: the rules it enforces
+    # are listed in `[tool.ty.rules]`, with the ones not yet clean marked "ignore" there rather
+    # than silenced here, so this job and a local `uv run ty check` always agree.
+    #
+    # Today that is `invalid-argument-type` -- a call passing the wrong type to a declared
+    # parameter. Python does not enforce annotations and a dataclass does not validate at
+    # construction, so without this such a call runs fine until the value is used, which can be
+    # in another process entirely.
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.core == 'true' ||
+      needs.detect-changes.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha || '' }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version-file: ".python-version"
+
+    # Same install as `test-api`, `--all-extras` included, and that is load-bearing rather than
+    # copy-paste: a checker only knows a third-party call's types if the package is installed.
+    # Without the extras, `mlx`, `oracledb` and the parser stack resolve to `Unknown`, every call
+    # into them becomes unverifiable, and the rule passes by knowing nothing -- which looks
+    # identical to passing by being correct.
+    - name: Install dependencies
+      working-directory: ./hindsight-api-slim
+      run: uv sync --frozen --all-extras --index-strategy unsafe-best-match
+
+    - name: ty check
+      working-directory: ./hindsight-api-slim
+      run: uv run ty check
 
   build-api-python-versions:
     needs: [detect-changes]
@@ -460,8 +510,6 @@ jobs:
     - name: Build hindsight-all-npm (openclaw dep)
       run: npm run build --workspace=hindsight-all-npm
 
-    - name: Build hindsight-agent-sdk (openclaw dep)
-      run: npm run build --workspace=hindsight-tools/hindsight-agent-sdk
 
     - name: Install openclaw dependencies
       working-directory: ./hindsight-integrations/openclaw
@@ -526,8 +574,6 @@ jobs:
     - name: Build hindsight-all-npm (openclaw dep)
       run: npm run build --workspace=hindsight-all-npm
 
-    - name: Build hindsight-agent-sdk (openclaw dep)
-      run: npm run build --workspace=hindsight-tools/hindsight-agent-sdk
 
     - name: Install openclaw dependencies
       working-directory: ./hindsight-integrations/openclaw
@@ -1100,39 +1146,6 @@ jobs:
       working-directory: ./hindsight-integrations/zapier
       run: npm test
 
-  test-hindsight-agent-sdk:
-    needs: [detect-changes]
-    if: >-
-      (github.event_name == 'workflow_dispatch' ||
-      needs.detect-changes.outputs.tools-agent-sdk == 'true' ||
-      needs.detect-changes.outputs.ci == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        ref: ${{ github.event.pull_request.head.sha || '' }}
-
-    - name: Set up Node.js
-      uses: actions/setup-node@v6
-      with:
-        node-version: '22'
-        cache: 'npm'
-        cache-dependency-path: package-lock.json
-
-    - name: Install root workspace dependencies
-      run: npm ci
-
-    - name: Build hindsight-client (agent-sdk dep)
-      run: npm run build --workspace=hindsight-clients/typescript
-
-    - name: Run tests
-      run: npm test --workspace=hindsight-tools/hindsight-agent-sdk
-
-    - name: Build
-      run: npm run build --workspace=hindsight-tools/hindsight-agent-sdk
-
   test-cloudflare-oauth-proxy-integration:
     needs: [detect-changes]
     if: >-
@@ -1366,6 +1379,33 @@ jobs:
       working-directory: ./hindsight-integrations/meta-muse
       run: uv run pytest tests -v
 
+  test-grok-bot-integration:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.integrations-grok-bot == 'true' ||
+      needs.detect-changes.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha || '' }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version-file: ".python-version"
+
+    # The plugin is manifests and skills — no Python package of its own, like claude-code.
+    - name: Install pytest
+      run: pip install pytest pydantic
+
+    - name: Run tests
+      working-directory: ./hindsight-integrations/grok-bot
+      run: python -m pytest tests -v
+
   test-roo-code-integration:
     needs: [detect-changes]
     if: >-
@@ -1471,9 +1511,9 @@ jobs:
           exit 1
         fi
 
-  test-interfig:
+  test-figures:
     needs: [detect-changes]
-    if: needs.detect-changes.outputs.interfig == 'true'
+    if: needs.detect-changes.outputs.figures == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -1482,25 +1522,20 @@ jobs:
       with:
         ref: ${{ github.event.pull_request.head.sha || '' }}
 
-    # Node 22 runs the .ts tests directly (type stripping); the docs build compiles the figures themselves.
     - name: Set up Node.js
       uses: actions/setup-node@v6
       with:
         node-version: '22'
-        cache: 'npm'
-        cache-dependency-path: package-lock.json
 
-    - name: Install dependencies
-      run: npm ci --workspace=@vectorize-io/interfig
-
-    - name: Typecheck (library and figures)
-      run: npm run typecheck --workspace=@vectorize-io/interfig
-
-    - name: Check formatting
-      run: npm run format:check --workspace=@vectorize-io/interfig
-
-    - name: Test
-      run: npm test --workspace=@vectorize-io/interfig
+    # The docs figures are Giotto diagrams; export each one with the Giotto the docs pin, so a
+    # figure that no longer draws fails here instead of in the browser.
+    - name: Export every figure
+      run: |
+        PIN=$(node -p "require('./hindsight-docs/package.json').dependencies.giotto")
+        for f in hindsight-docs/figures/*.json; do
+          echo "$f"
+          npx --yes --package "$PIN" giotto export "$f" /tmp/figure.svg
+        done
 
     # The docs skill turns each figure into its narration by reading the figure files.
     - name: Check every figure renders as text for the docs skill
@@ -1946,6 +1981,31 @@ jobs:
       # pytest-split filters at collection (before xdist takes over), so it
       # composes cleanly with the `-n 8 --dist loadgroup` baked into addopts.
       run: uv run --with pytest-split pytest tests -v -m "not hs_llm_mat and not hs_llm_core" --splits 3 --group ${{ matrix.shard }}
+
+    # The eight workers share one embedded Postgres, so this job's two recurring
+    # red shapes are both lock contention: `deadlock detected`, whose own message
+    # ends "See server log for query details", and a pile of unrelated tests all
+    # failing `Timeout (>300.0s)` in the same second behind one AccessExclusiveLock.
+    # Neither is diagnosable from the pytest output alone, and the server log used
+    # to die with the runner — which is why this class has been re-diagnosed by
+    # inference in #3406, #3543, #4407 and #4414. Keep the log instead.
+    # Copied into the workspace first: `upload-artifact` globs but does not expand
+    # `~`, so pointing it at the pg0 instance dir uploads nothing.
+    - name: Collect Postgres server log
+      if: failure()
+      run: |
+        mkdir -p pg-server-log
+        cp -r ~/.pg0/instances/*/data/log/. pg-server-log/ 2>/dev/null || true
+        ls -la pg-server-log/ || true
+
+    - name: Upload Postgres server log on failure
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: pg-server-log-shard-${{ matrix.shard }}
+        path: pg-server-log/
+        if-no-files-found: warn
+        retention-days: 7
 
   test-api-llm-core:
     needs: [detect-changes]
@@ -3365,8 +3425,6 @@ jobs:
     - name: Build hindsight-all-npm (openclaw dep)
       run: npm run build --workspace=hindsight-all-npm
 
-    - name: Build hindsight-agent-sdk (openclaw dep)
-      run: npm run build --workspace=hindsight-tools/hindsight-agent-sdk
 
     - name: Install openclaw integration dependencies
       working-directory: ./hindsight-integrations/openclaw
@@ -5721,11 +5779,12 @@ jobs:
       - test-pipecat-integration
       - test-gemini-spark-integration
       - test-meta-muse-integration
+      - test-grok-bot-integration
       - test-vapi-integration
       - test-google-adk-integration
       - test-roo-code-integration
       - build-control-plane
-      - test-interfig
+      - test-figures
       - build-docs
       - test-rust-cli
       - lint-helm-chart
@@ -5772,7 +5831,6 @@ jobs:
       - verify-embed-control-center-bundle
       - test-hermes-compat
       - test-hindsight-all
-      - test-hindsight-agent-sdk
       - test-claude-agent-sdk-integration
       - test-doc-examples
       - test-upgrade

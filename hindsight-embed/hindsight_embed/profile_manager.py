@@ -230,7 +230,7 @@ class ProfilePaths:
     lock: Path
     log: Path
     port: int
-    ui_log: Path = None  # type: ignore[assignment]
+    ui_log: Path = None  # ty: ignore[invalid-assignment]  -- __post_init__ derives it from `log`
     ui_port: int = 0  # 0 → derive as port + UI_PORT_OFFSET
 
     def __post_init__(self):
@@ -753,12 +753,13 @@ def resolve_active_profile() -> str:
     """
     # 1. Environment variable
     if env_profile := os.getenv("HINDSIGHT_EMBED_PROFILE"):
-        return env_profile
+        return "" if env_profile == "default" else env_profile
 
     # 2. CLI flag (set by caller before invoking commands)
     from . import cli
 
-    if cli_profile := cli.get_cli_profile_override():
+    cli_profile = cli.get_cli_profile_override()
+    if cli_profile is not None:
         return cli_profile
 
     # 3. Active profile file

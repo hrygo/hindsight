@@ -1,0 +1,438 @@
+/* Three stages left to right: who talks to Hindsight, Hindsight itself, and the
+   database underneath. Deliberately light on chrome — the hero above it is
+   container-less and this sits directly underneath. */
+.flow {
+  display: grid;
+  grid-template-columns: minmax(0, 2.5fr) auto minmax(0, 1fr) auto minmax(0, 0.72fr);
+  /* Not stretch: the columns have genuinely different content heights, and
+     stretching left the short ones with dead space at the bottom. */
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 3rem;
+}
+
+/* ── Sources ──────────────────────────────────────────────────────────────*/
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.flow .source {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  color: inherit !important;
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 0.7rem;
+  transition: border-color 0.15s ease, box-shadow 0.2s ease;
+}
+
+.flow .source:hover,
+.flow .source:focus-within {
+  text-decoration: none;
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.06);
+}
+
+/* ── What each card opens ─────────────────────────────────────────────────
+   The card itself grows: the panel is in the card's own flow, so nothing is
+   covered up and the diagram simply re-lays out around it. Collapsed with a
+   0fr→1fr grid row rather than max-height — no magic number to keep in sync,
+   and the three cards hold very different things. */
+.reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.35s ease, opacity 0.25s ease, margin-top 0.35s ease;
+}
+
+.reveal > * {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* focus-within as well as hover: a keyboard tabs into the card's links and must
+   get the same thing a pointer does. */
+.flow .source:hover .reveal,
+.flow .source:focus-within .reveal {
+  grid-template-rows: 1fr;
+  margin-top: 0.4rem;
+  opacity: 1;
+}
+
+/* The line under whatever the card opened. It sits inside the card's own <a>,
+   which is why the colour has to be forced. */
+.flow .revealNote {
+  display: block;
+  margin-top: 0.45rem;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--ifm-color-emphasis-600) !important;
+}
+
+/* The assistant exchange. Two bubbles, the question narrow and the answer wide,
+   so it reads as a conversation without drawing an avatar for either side. */
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.chat .ask,
+.chat .reply {
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.6rem;
+}
+
+.chat .ask {
+  align-self: flex-end;
+  max-width: 85%;
+  color: var(--ifm-font-color-base);
+  background: var(--ifm-color-emphasis-200);
+  border-bottom-right-radius: 0.2rem;
+}
+
+.chat .reply {
+  align-self: flex-start;
+  color: var(--ifm-font-color-base);
+  background: var(--hindsight-active-surface);
+  border: 1px solid rgba(0, 116, 217, 0.25);
+  border-bottom-left-radius: 0.2rem;
+}
+
+/* The three calls. Not a Docusaurus code block — this is inside a card that is
+   itself a link, and the full block brings a copy button and a toolbar with it. */
+.flow .code {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.74rem;
+  line-height: 1.7;
+  background: var(--ifm-background-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 0.5rem;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.flow .code code {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--ifm-color-emphasis-800);
+}
+
+/* ── Personal agents ──────────────────────────────────────────────────────
+   Two names and two arrows. The boxed chips this replaced made a two-item list
+   look like a toolbar. */
+.assistants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.1rem;
+  margin-top: 0.1rem;
+}
+
+.flow .assistant {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ifm-font-color-base) !important;
+}
+
+.flow .assistant img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+[data-theme='dark'] .flow .assistant img {
+  padding: 1px;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 4px;
+}
+
+.flow .assistant:hover {
+  text-decoration: none;
+  color: var(--ifm-color-primary) !important;
+}
+
+.sourceLabel {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ifm-color-emphasis-600);
+}
+
+.icons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.icons img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+/* Several of these marks are near-black line art and vanish on a dark page.
+   Inverting only those would mean tracking which is which; lifting all of them
+   onto a light chip keeps every logo on the background it was drawn for. */
+[data-theme='dark'] .icons img {
+  padding: 2px;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 5px;
+}
+
+.sourceNote {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+  color: var(--ifm-color-emphasis-600);
+}
+
+.flow a.source .sourceNote {
+  color: var(--ifm-color-primary);
+}
+
+/* ── Connectors ───────────────────────────────────────────────────────────
+   A hairline with a chevron rather than a drawn arrow: it has to read at a
+   glance and then get out of the way. */
+.connector {
+  position: relative;
+  align-self: center;
+  width: 2rem;
+  height: 1px;
+  background: var(--ifm-color-emphasis-300);
+}
+
+.connector::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--ifm-color-emphasis-400);
+  border-right: 1px solid var(--ifm-color-emphasis-400);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+/* ── Hindsight ────────────────────────────────────────────────────────────
+   The only tinted box, and the one with something nested inside it: the memory
+   bank is part of this, not a fourth stage. */
+.core {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1rem;
+  background: var(--hindsight-active-surface);
+  border: 1px solid rgba(0, 116, 217, 0.3);
+  border-radius: 0.7rem;
+}
+
+.coreName {
+  font-family: 'Space Grotesk', var(--ifm-font-family-base);
+  font-size: 1rem;
+  font-weight: 700;
+  background: var(--hindsight-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.ops {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.ops code {
+  display: inline-block;
+  min-width: 3.9rem;
+  margin-right: 0.4rem;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.78rem;
+  color: var(--ifm-color-primary);
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+}
+
+/* Nested one level in, on its own surface, so it reads as a thing Hindsight
+   contains. */
+.bank {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.7rem 0.8rem;
+  background: var(--ifm-background-color);
+  border: 1px dashed var(--ifm-color-emphasis-300);
+  border-radius: 0.5rem;
+}
+
+.bankName {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ifm-color-emphasis-600);
+}
+
+.bankItems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.bankItems span {
+  padding: 0.12rem 0.45rem;
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-800);
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 0.3rem;
+}
+
+.bankNote {
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-600);
+}
+
+/* ── Storage ──────────────────────────────────────────────────────────────*/
+.store {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1rem;
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 0.7rem;
+}
+
+.storeIcon {
+  color: #336791; /* Postgres blue — the mark's own colour, not a theme token. */
+}
+
+.storeName {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.storeNote {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--ifm-color-emphasis-600);
+}
+
+/* ── Where it runs ────────────────────────────────────────────────────────
+   Three ways to get that database, managed first: it is the only one that
+   takes no decision from the reader. Custom markers rather than list-style, so
+   the first entry can carry the brand gradient and the rest stay quiet. */
+.flow .options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.flow .options li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding-left: 0.95rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ifm-font-color-base);
+}
+
+.flow .options li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.4em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ifm-color-emphasis-400);
+}
+
+/* The qualifier under each option. */
+.flow .options li span {
+  font-size: 0.73rem;
+  font-weight: 400;
+  color: var(--ifm-color-emphasis-600);
+}
+
+.flow .optionPrimary::before {
+  background: var(--hindsight-gradient-horizontal);
+  /* A soft ring so the managed option reads as the recommended one without
+     needing a badge. */
+  box-shadow: 0 0 0 3px var(--hindsight-active-surface);
+}
+
+.flow .optionPrimary a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 700;
+  color: var(--ifm-color-primary);
+}
+
+.flow .optionPrimary a:hover {
+  text-decoration: none;
+  filter: brightness(1.15);
+}
+
+/* ── Narrow screens ───────────────────────────────────────────────────────
+   Five columns become one, and the connectors turn a quarter so the flow still
+   reads in order. */
+/* No pointer, no reveal — so there is nothing to reveal: every card is open.
+   Covers touch at any width, and the stacked narrow layout below. */
+@media (hover: none), (max-width: 996px) {
+  /* Nothing to hover, so every card is simply open. */
+  .reveal {
+    grid-template-rows: 1fr;
+    margin-top: 0.4rem;
+    opacity: 1;
+  }
+}
+
+@media (max-width: 996px) {
+  .flow {
+    grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+
+  .connector {
+    justify-self: center;
+    width: 1px;
+    height: 1.5rem;
+  }
+
+  .connector::after {
+    right: 50%;
+    top: auto;
+    bottom: 0;
+    transform: translateX(50%) rotate(135deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    transition: none;
+  }
+}

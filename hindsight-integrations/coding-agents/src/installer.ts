@@ -45,7 +45,7 @@ import { HOOK_HARNESSES, type HookHarnessName } from "./harness/hook-lifecycle";
 import { importLocalHistory } from "./core/history";
 import { detectLlm, hasRustToolchain, hasUvx, type LlmChoice } from "./core/daemon";
 import { readLegacyEndpoint } from "./core/legacy";
-import { readEnvConfig } from "./core/config";
+import { loadConfig } from "./core/config";
 import { isOurMcpEntry } from "./core/util";
 import { SKILL_DIRS, resolveSkillDirs, traecodeDotDirName } from "./core/skill-dirs";
 import {
@@ -315,25 +315,12 @@ function skillsBaseFor(c: InstallCtx, harness: string): string {
 /** Has the user turned the packaged companion skill off? Read from the same config file the
  *  runtime reads, so `install` cannot undo what the sessions were told to respect. A missing or
  *  unreadable config keeps upstream behaviour. */
-function companionSkillDisabled(c: InstallCtx): boolean {
-  let fromFile: unknown;
-  try {
-    fromFile = JSON.parse(
-      readFileSync(join(c.home, ".hindsight", "coding-agent.json"), "utf8")
-    )?.companionSkill;
-  } catch {
-    // Missing or unreadable: fall through to the env layer rather than reading as "not disabled".
-    fromFile = undefined;
-  }
-  // core/config.ts layers defaults → env → file → harnesses.<name>, so the FILE wins and the env
-  // var is only a fallback. readEnvConfig applies the same "unset or empty contributes nothing"
-  // rule, and a value that is present but not the exact string "never" normalizes to enabled on
-  // both sides — `install` must never disagree with the sessions about the same switch.
-  return (fromFile ?? readEnvConfig().companionSkill) === "never";
+function companionSkillDisabled(c: InstallCtx, harness: string): boolean {
+  return loadConfig({ path: hindsightConfigPath(c), harness }).companionSkill === "never";
 }
 
 function installSkill(c: InstallCtx, harness: string): void {
-  if (companionSkillDisabled(c)) {
+  if (companionSkillDisabled(c, harness)) {
     c.log?.(`${harness}: companion skill skipped (companionSkill=never)`);
     return;
   }
@@ -2282,6 +2269,83 @@ const traecode: HarnessInstaller = {
   },
 };
 
+/**
+ * WorkBuddy and CodeBuddy Code run the same `@genie/agent-cli` engine, one home folder apart
+ * (`~/.workbuddy` vs `~/.codebuddy`). Both read the nested Claude-shaped hooks block from
+ * `<home>/settings.json`, so `mergeHarnessHooks` writes it unchanged, and both take the MCP server
+ * from a plain FILE (no external CLI involved). The companion skill lands in each host's own root
+ * (see SKILL_DIRS).
+ *
+ * `mcpPaths` is the host's MCP file lookup, highest priority first: the installer writes the FIRST
+ * one that exists (or the first one when none do), and uninstall sweeps them all — an entry
+ * installed before a higher-priority file appeared would otherwise survive as a dormant duplicate.
+ */
+const genieInstaller = (
+  name: "workbuddy" | "codebuddy",
+  homeDir: string,
+  mcpPaths: (home: string) => string[]
+): HarnessInstaller => ({
+  name,
+  detect: (c) => existsSync(join(c.home, homeDir)),
+  install(c) {
+    const settingsPath = join(c.home, homeDir, "settings.json");
+    const settings = readJson(settingsPath);
+    settings.hooks = settings.hooks ?? {};
+    mergeHarnessHooks(settings.hooks, name, c.dist);
+    writeJson(settingsPath, settings);
+    c.log?.(`${name}: hooks merged into ${settingsPath}`);
+
+    const paths = mcpPaths(c.home);
+    const mcpPath = paths.find((p) => existsSync(p)) ?? paths[0];
+    const mcp = readJson(mcpPath);
+    mcp.mcpServers = mcp.mcpServers ?? {};
+    mcp.mcpServers.hindsight = mcpServerEntry(c.dist, name);
+    writeJson(mcpPath, mcp);
+    c.log?.(`${name}: MCP server registered in ${mcpPath}`);
+
+    installSkill(c, name);
+  },
+  uninstall(c) {
+    const settingsPath = join(c.home, homeDir, "settings.json");
+    if (existsSync(settingsPath)) {
+      const settings = readJson(settingsPath);
+      if (settings.hooks) {
+        stripHarnessHooks(settings.hooks, name);
+        if (!Object.keys(settings.hooks).length) delete settings.hooks;
+        writeJson(settingsPath, settings);
+      }
+    }
+    for (const mcpPath of mcpPaths(c.home)) {
+      if (!existsSync(mcpPath)) continue;
+      const mcp = readJson(mcpPath);
+      if (isOurMcpEntry(mcp.mcpServers?.hindsight)) {
+        delete mcp.mcpServers.hindsight;
+        if (!Object.keys(mcp.mcpServers).length) delete mcp.mcpServers;
+        writeJson(mcpPath, mcp);
+      }
+    }
+    uninstallSkill(c, name);
+    c.log?.(`${name}: hooks + MCP registration + skill removed`);
+  },
+});
+
+/** WorkBuddy (Tencent's AI workbench): one MCP file, `~/.workbuddy/mcp.json`. */
+const workbuddy = genieInstaller("workbuddy", ".workbuddy", (home) => [
+  join(home, ".workbuddy", "mcp.json"),
+]);
+
+/**
+ * CodeBuddy resolves its user-scope MCP file by priority — ~/.codebuddy/.mcp.json (recommended),
+ * then ~/.codebuddy/mcp.json (deprecated), then ~/.codebuddy.json (legacy) — reading and writing
+ * the FIRST one that exists (codebuddy.ai/docs/cli/mcp). Writing the recommended path
+ * unconditionally would shadow a user whose servers live in the deprecated file.
+ */
+const codebuddy = genieInstaller("codebuddy", ".codebuddy", (home) => [
+  join(home, ".codebuddy", ".mcp.json"),
+  join(home, ".codebuddy", "mcp.json"),
+  join(home, ".codebuddy.json"),
+]);
+
 export const INSTALLERS: HarnessInstaller[] = [
   opencode,
   opencode2,
@@ -2303,6 +2367,8 @@ export const INSTALLERS: HarnessInstaller[] = [
   factoryDroid,
   zcode,
   traecode,
+  workbuddy,
+  codebuddy,
 ];
 
 // The public executable was renamed from Gemini CLI to Antigravity's `agy`. Keep the

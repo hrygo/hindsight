@@ -934,6 +934,16 @@ class DataAccessOps(ABC):
     # -- Task claiming operations ------------------------------------------
 
     @abstractmethod
+    async def fetch_reconcilable_batch_parents(self, conn: DatabaseConnection, table: str) -> list[ResultRow]:
+        """Find pending payload-less batch parents without unfinished same-bank children.
+
+        A pre-filter for the worker's startup recovery, which rechecks each
+        candidate under a row lock: returning a healthy parent costs one wasted
+        transaction, omitting a stranded one leaves it stranded forever.
+        """
+        ...
+
+    @abstractmethod
     async def prune_terminal_operations(
         self,
         conn: DatabaseConnection,
@@ -1041,6 +1051,6 @@ class DataAccessOps(ABC):
 
     def _get_mu_table(self) -> str:
         """Get the fully-qualified memory_units table name."""
-        from ..schema import fq_table
+        from ..schema import fq_store_table
 
-        return fq_table("memory_units")
+        return fq_store_table("memory_units")

@@ -82,6 +82,17 @@ class StubbedReply:
     reasoning_tokens: int = 0
     """Opt-in OpenAI reasoning tokens, included in completion_tokens on the wire."""
 
+    error_status: int | None = None
+    """When set, the stub answers with a provider error at this HTTP status instead."""
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """One tool call a computed rule answers with."""
+
+    name: str
+    arguments: dict[str, Any]
+
 
 @dataclass(frozen=True)
 class ChatRule:
@@ -137,6 +148,16 @@ class RuleBuilder:
             )
         )
 
+    def fails_with_status(self, status: int) -> LLMStub:
+        """Answer with a provider error at ``status`` — a 429 or a 5xx, say.
+
+        For stories about how the server treats a provider that is down or
+        rate-limited, which no successful reply can stand in for.
+        """
+        return self._register(
+            lambda _request: StubbedReply(message={}, finish_reason="error", error_status=status)
+        )
+
     def returns_text(self, text: str) -> LLMStub:
         return self._register(lambda _request: _assistant_message(text))
 
@@ -164,6 +185,20 @@ class RuleBuilder:
 
         def respond(_request: ChatRequest) -> StubbedReply:
             return _tool_call(tool_name, arguments)
+
+        return self._register(respond, requires_tools=True)
+
+    def answers_with_tool_call(self, build: Callable[[ChatRequest], ToolCall]) -> LLMStub:
+        """Compute the tool call from the request that triggered it.
+
+        For a turn whose right answer depends on what already happened in the loop —
+        call a tool once, then finish — which a fixed reply cannot express: the
+        reflect loop offers the same tools on every free turn.
+        """
+
+        def respond(request: ChatRequest) -> StubbedReply:
+            call = build(request)
+            return _tool_call(call.name, call.arguments)
 
         return self._register(respond, requires_tools=True)
 

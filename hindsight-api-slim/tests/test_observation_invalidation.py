@@ -806,17 +806,31 @@ async def _insert_document_with_memories(
 ) -> list[uuid.UUID]:
     """Insert a document and attach memory units to it. Returns list of memory UUIDs.
 
-    The documents row stays SQL (it is Postgres bookkeeping for every store); the memories
-    go through the store, attached via document_id at insert time.
+    The document goes wherever the store keeps it, and the memories go through the store,
+    attached via document_id at insert time. `documents` is a store table (#4969): a store that
+    owns its bank keeps the record itself and never reads the SQL row, so seeding the row here
+    left every one of these tests updating a document the engine reports as not found.
     """
-    await conn.execute(
-        """
-        INSERT INTO documents (id, bank_id, original_text, content_hash, created_at, updated_at)
-        VALUES ($1, $2, 'some doc', 'hash123', NOW(), NOW())
-        """,
-        doc_id,
-        bank_id,
-    )
+    from hindsight_api.engine.memories import get_memories
+
+    store = get_memories()
+    if store.store_owned_for(bank_id):
+        await store.put_document(
+            bank_id=bank_id,
+            document_id=doc_id,
+            content_hash="hash123",
+            original_text="some doc",
+            chunk_texts=[],
+        )
+    else:
+        await conn.execute(
+            """
+            INSERT INTO documents (id, bank_id, original_text, content_hash, created_at, updated_at)
+            VALUES ($1, $2, 'some doc', 'hash123', NOW(), NOW())
+            """,
+            doc_id,
+            bank_id,
+        )
     mem_ids = []
     for text, fact_type in memories:
         mem_ids.append(await _insert_memory(memory, conn, bank_id, text, fact_type, document_id=doc_id))
@@ -1310,6 +1324,39 @@ class TestConsolidationSourceMemoryFiltering:
         stored_set = {str(s) for s in stored}
         assert str(live) in stored_set
         assert str(dead) not in stored_set, "Deleted source must not appear in stored observation"
+
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+    @pytest.mark.asyncio
+    async def test_create_observation_counts_each_live_source_once(
+        self, memory: MemoryEngine, request_context: RequestContext
+    ):
+        """proof_count is the number of distinct live sources, not a literal 1 (#4955)."""
+        from tests.consolidation_actions import create_observation as _create_observation_directly
+
+        bank_id = f"test-create-proof-count-{uuid.uuid4().hex[:8]}"
+        await _ensure_bank(memory, bank_id, request_context)
+
+        backend = await memory._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            a = await _insert_memory(memory, conn, bank_id, "Alice changed the timeout in app.yaml.")
+            b = await _insert_memory(memory, conn, bank_id, "Alice changed the retry count in app.yaml.")
+            c = await _insert_memory(memory, conn, bank_id, "Alice changed the log level in app.yaml.")
+        dead = uuid.uuid4()
+
+        result = await _create_observation_directly(
+            pool=backend,
+            memory_engine=memory,
+            bank_id=bank_id,
+            source_memory_ids=[a, b, a, dead, c],
+            observation_text="Alice keeps tuning app.yaml.",
+        )
+
+        assert result["action"] == "created"
+        async with acquire_with_retry(backend) as conn:
+            stored = await _get_memory(conn, bank_id, result["observation_id"])
+        assert [str(s) for s in stored.source_memory_ids] == [str(a), str(b), str(c)]
+        assert stored.proof_count == 3
 
         await memory.delete_bank(bank_id, request_context=request_context)
 

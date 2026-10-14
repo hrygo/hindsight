@@ -11,7 +11,7 @@ import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Union, cast
 
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -204,6 +204,13 @@ ENV_LLM_STRUCTURED_OUTPUT_FORCED_TOOL = "HINDSIGHT_API_LLM_STRUCTURED_OUTPUT_FOR
 # identify — and the off switch for an endpoint that rejects images despite its
 # model name.
 ENV_LLM_VISION = "HINDSIGHT_API_LLM_VISION"
+# Whether the backend honours OpenAI's ``response_format={"type": "json_object"}``.
+# Tri-state like ENV_LLM_VISION: unset lets the provider decide (LM Studio, Ollama
+# and Volcano say no; llama.cpp follows HINDSIGHT_API_LLAMACPP_NO_GRAMMAR; the rest
+# say yes). When false, the soft path sends the schema in the prompt only. Needed
+# for ``provider=openai`` pointed at a local server that can't constrain output and
+# instead rewrites the prompt in ways a thinking model can loop on (issue #4935).
+ENV_LLM_OPENAI_COMPATIBLE_JSON_MODE = "HINDSIGHT_API_LLM_OPENAI_COMPATIBLE_JSON_MODE"
 ENV_LLM_SEND_BANK_AS_USER = "HINDSIGHT_API_LLM_SEND_BANK_AS_USER"
 ENV_LLM_OLLAMA_NUM_CTX = "HINDSIGHT_API_LLM_OLLAMA_NUM_CTX"
 
@@ -568,7 +575,10 @@ ENV_EMBEDDINGS_LITELLM_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_LITELLM_DIMENSIONS
 ENV_RERANKER_LITELLM_API_BASE = "HINDSIGHT_API_RERANKER_LITELLM_API_BASE"
 ENV_RERANKER_LITELLM_API_KEY = "HINDSIGHT_API_RERANKER_LITELLM_API_KEY"
 ENV_RERANKER_LITELLM_MODEL = "HINDSIGHT_API_RERANKER_LITELLM_MODEL"
+# Deprecated alias of ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE, folded into it at load time.
 ENV_RERANKER_LITELLM_MAX_TOKENS_PER_DOC = "HINDSIGHT_API_RERANKER_LITELLM_MAX_TOKENS_PER_DOC"
+# Provider-agnostic per-candidate truncation cap (tokens, see ENV_TOKENIZER_ENCODING).
+ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE = "HINDSIGHT_API_RERANKER_MAX_TOKENS_PER_CANDIDATE"
 
 # LiteLLM SDK configuration (direct API access, no proxy needed)
 ENV_EMBEDDINGS_LITELLM_SDK_API_KEY = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_API_KEY"
@@ -909,6 +919,7 @@ ENV_DB_POOL_MIN_SIZE = "HINDSIGHT_API_DB_POOL_MIN_SIZE"
 ENV_DB_POOL_MAX_SIZE = "HINDSIGHT_API_DB_POOL_MAX_SIZE"
 ENV_DB_COMMAND_TIMEOUT = "HINDSIGHT_API_DB_COMMAND_TIMEOUT"
 ENV_DB_ACQUIRE_TIMEOUT = "HINDSIGHT_API_DB_ACQUIRE_TIMEOUT"
+ENV_DB_POOL_SLOW_ACQUIRE_THRESHOLD_SECONDS = "HINDSIGHT_API_DB_POOL_SLOW_ACQUIRE_THRESHOLD_SECONDS"
 ENV_DB_STATEMENT_TIMEOUT = "HINDSIGHT_API_DB_STATEMENT_TIMEOUT"
 ENV_DB_MAX_PARALLEL_WORKERS_PER_GATHER = "HINDSIGHT_API_DB_MAX_PARALLEL_WORKERS_PER_GATHER"
 ENV_DB_SESSION_SETUP_ON_ACQUIRE = "HINDSIGHT_API_DB_SESSION_SETUP_ON_ACQUIRE"
@@ -1477,7 +1488,10 @@ DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA = "paradedb"
 DEFAULT_LITELLM_API_BASE = "http://localhost:4000"
 DEFAULT_EMBEDDINGS_LITELLM_MODEL = "text-embedding-3-small"
 DEFAULT_RERANKER_LITELLM_MODEL = "cohere/rerank-english-v3.0"
-DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC: int | None = None
+# Per-candidate truncation before rerank, applied to every provider. Off by default;
+# set it to the model's context window (or lower, to bound request size on a CPU-only
+# rerank server).
+DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE: int | None = None
 
 # LiteLLM SDK defaults
 DEFAULT_EMBEDDINGS_LITELLM_SDK_MODEL = "cohere/embed-english-v3.0"
@@ -1801,6 +1815,7 @@ DEFAULT_DB_POOL_MIN_SIZE = 5
 DEFAULT_DB_POOL_MAX_SIZE = 100
 DEFAULT_DB_COMMAND_TIMEOUT = 60  # seconds
 DEFAULT_DB_ACQUIRE_TIMEOUT = 30  # seconds
+DEFAULT_DB_POOL_SLOW_ACQUIRE_THRESHOLD_SECONDS = 0.05  # 0 disables the warning
 DEFAULT_DB_STATEMENT_TIMEOUT = 600  # seconds (Postgres statement_timeout applied on every pool connection; 0 disables)
 # Optional cap on Postgres planner parallelism for this process's pool
 # connections (SET max_parallel_workers_per_gather). None leaves the server
@@ -1834,9 +1849,11 @@ DEFAULT_DB_MAX_PARALLEL_WORKERS_PER_GATHER: int | None = None
 DEFAULT_DB_SESSION_SETUP_ON_ACQUIRE = True
 # pg_trgm similarity threshold applied on every pool connection (SET
 # pg_trgm.similarity_threshold). Governs how close a name must be for the `%`
-# operator to treat it as a candidate during entity resolution: lower catches
-# more substring-ish matches at higher CPU cost, higher is stricter and cheaper.
-DEFAULT_ENTITY_TRGM_SIMILARITY_THRESHOLD = 0.15
+# operator to treat it as a candidate during entity resolution. Never applied below
+# ENTITY_MERGE_MIN_SIMILARITY (see HindsightConfig.entity_trgm_probe_threshold). It used to
+# default to 0.15 while the merge floor is 0.3, so about half the candidates were fetched,
+# scored and always discarded (#5367). Raise it above the floor to look at fewer, closer names.
+DEFAULT_ENTITY_TRGM_SIMILARITY_THRESHOLD = 0.3
 # pg_trgm similarity at/above which two brand-new names created by the SAME retain are merged
 # into one entity (in-batch dedup — surface-form variants that would otherwise each create a
 # distinct row). pg_trgm ignores non-alphanumerics, so decoration variants score ~1.0 and
@@ -1846,14 +1863,14 @@ DEFAULT_ENTITY_TRGM_SIMILARITY_THRESHOLD = 0.15
 DEFAULT_ENTITY_INTRABATCH_MERGE_SIMILARITY = 0.5
 # Minimum pg_trgm similarity a name must have with an EXISTING entity before that entity can
 # be reused for it. The composite resolution score (name + co-occurrence + recency) has no
-# floor of its own, so without this a name the trigram probe merely admitted as a candidate
-# (>= ENTITY_TRGM_SIMILARITY_THRESHOLD, 0.15) could still be merged onto purely because the
-# bank had seen it recently alongside the same entities — attributing a new person's facts to
-# an unrelated entity (#3751). Applied as a gate, not as a replacement for the name score, so
-# anything that merges above it is unaffected. Sits between the recall threshold (0.15) and the
-# stricter same-batch fold-in cutoff (ENTITY_INTRABATCH_MERGE_SIMILARITY, 0.5). Lower it for
-# corpora of very short names, where trigram similarity is unavoidably low ("Jon"/"John" is
-# 0.29); raise it to merge only clear surface variants.
+# floor of its own, so without this a name a candidate probe merely admitted could still be
+# merged onto purely because the bank had seen it recently alongside the same entities —
+# attributing a new person's facts to an unrelated entity (#3751). Applied as a gate, not as a
+# replacement for the name score, so anything that merges above it is unaffected. Also the
+# lowest threshold the pg_trgm probe runs at; below the stricter same-batch fold-in cutoff
+# (ENTITY_INTRABATCH_MERGE_SIMILARITY, 0.5). Lower it for corpora of very short names, where
+# trigram similarity is unavoidably low ("Jon"/"John" is 0.29); raise it to merge only clear
+# surface variants.
 DEFAULT_ENTITY_MERGE_MIN_SIMILARITY = 0.3
 DEFAULT_MODEL_INIT_TIMEOUT = 300  # seconds (cap on startup model/connection init; covers first-time downloads)
 
@@ -2399,6 +2416,49 @@ def _resolve_reflect_llm_timeout() -> float | None:
     return DEFAULT_REFLECT_LLM_TIMEOUT
 
 
+def _env_int(env_var: str) -> int | None:
+    """An optional integer setting, or None when the variable is unset or empty.
+
+    Reads the variable ONCE. The idiom this replaces -- ``int(os.getenv(X)) if os.getenv(X) else
+    None`` -- reads it twice, so the conversion is not guarded by the check it looks guarded by:
+    the two calls are independent, and nothing ties the value that was tested to the value that
+    is converted.
+    """
+    raw = os.getenv(env_var)
+    return int(raw) if raw else None
+
+
+def _env_int_or(env_var: str, default: int | None) -> int | None:
+    """`_env_int` with a caller-supplied fallback. Reads the variable once, same reason.
+
+    The fallback is itself optional: several of these settings use None to mean "fall back to
+    the per-bank value in the database" rather than to a number.
+    """
+    raw = os.getenv(env_var)
+    return int(raw) if raw else default
+
+
+def _env_str_list(env_var: str) -> list[str] | None:
+    """A comma-separated list setting, or None when unset. Single read, as `_env_int`."""
+    raw = os.getenv(env_var)
+    return _parse_str_list(raw) if raw else None
+
+
+def _env_float(env_var: str) -> float | None:
+    """An optional float setting, or None when the variable is unset or empty. See `_env_int`."""
+    raw = os.getenv(env_var)
+    return float(raw) if raw else None
+
+
+def _env_default_model(provider_env: str) -> str | None:
+    """The provider's default model, or None when no provider is configured.
+
+    Same single-read rule as `_env_int`: the provider name that is tested is the one passed on.
+    """
+    provider = os.getenv(provider_env)
+    return _get_default_model_for_provider(provider) if provider else None
+
+
 def _parse_llm_router_config(env_var: str) -> dict | None:
     """
     Parse a LiteLLM Router configuration from a JSON env var.
@@ -2643,6 +2703,8 @@ class RerankerMemberConfig:
 
     index: int
     provider: str
+    # Provider-agnostic per-candidate token cap; None disables truncation.
+    max_tokens_per_candidate: int | None
     # local
     local_model: str
     local_force_cpu: bool
@@ -2676,7 +2738,6 @@ class RerankerMemberConfig:
     litellm_api_base: str
     litellm_api_key: str | None
     litellm_model: str
-    litellm_max_tokens_per_doc: int | None
     litellm_timeout: float
     # litellm-sdk
     litellm_sdk_api_key: str | None
@@ -2796,6 +2857,12 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
             RerankerMemberConfig(
                 index=index,
                 provider=provider,
+                # Generic name, falling back to the deprecated LiteLLM-specific alias.
+                max_tokens_per_candidate=_member_opt_int(
+                    base,
+                    "MAX_TOKENS_PER_CANDIDATE",
+                    _member_opt_int(base, "LITELLM_MAX_TOKENS_PER_DOC", DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE),
+                ),
                 local_model=_member_str(base, "LOCAL_MODEL", DEFAULT_RERANKER_LOCAL_MODEL),
                 local_force_cpu=_member_bool(base, "LOCAL_FORCE_CPU", DEFAULT_RERANKER_LOCAL_FORCE_CPU),
                 local_max_concurrent=_member_int(base, "LOCAL_MAX_CONCURRENT", DEFAULT_RERANKER_LOCAL_MAX_CONCURRENT),
@@ -2829,9 +2896,6 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
                 litellm_api_base=_member_str(base, "LITELLM_API_BASE", DEFAULT_LITELLM_API_BASE),
                 litellm_api_key=_member_opt_str(base, "LITELLM_API_KEY"),
                 litellm_model=_member_str(base, "LITELLM_MODEL", DEFAULT_RERANKER_LITELLM_MODEL),
-                litellm_max_tokens_per_doc=_member_opt_int(
-                    base, "LITELLM_MAX_TOKENS_PER_DOC", DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC
-                ),
                 litellm_timeout=_member_float(base, "LITELLM_TIMEOUT", DEFAULT_RERANKER_LITELLM_TIMEOUT),
                 litellm_sdk_api_key=_member_opt_str(base, "LITELLM_SDK_API_KEY"),
                 litellm_sdk_model=_member_str(base, "LITELLM_SDK_MODEL", DEFAULT_RERANKER_LITELLM_SDK_MODEL),
@@ -3023,6 +3087,9 @@ class HindsightConfig:
     # Tri-state override for "can this LLM read images?". None defers to the
     # provider's own answer; True/False overrides it. See ENV_LLM_VISION.
     llm_vision: bool | None = field(default=None, kw_only=True)
+    # Tri-state override for "does the backend honour json_object?". None defers to
+    # the provider's default. See ENV_LLM_OPENAI_COMPATIBLE_JSON_MODE.
+    llm_openai_compatible_json_mode: bool | None = field(default=None, kw_only=True)
 
     # Per-operation sampling temperature. None means the temperature parameter is
     # omitted from the call (for models that reject explicit temperatures). See
@@ -3199,6 +3266,8 @@ class HindsightConfig:
 
     # Reranker
     reranker_provider: str
+    # Provider-agnostic per-candidate token cap; None disables truncation.
+    reranker_max_tokens_per_candidate: int | None
     reranker_send_bank_as_header: bool
     reranker_local_model: str
     reranker_local_force_cpu: bool
@@ -3238,7 +3307,6 @@ class HindsightConfig:
     reranker_litellm_api_base: str
     reranker_litellm_api_key: str | None
     reranker_litellm_model: str
-    reranker_litellm_max_tokens_per_doc: int | None
     reranker_litellm_timeout: float
     reranker_litellm_sdk_api_key: str | None
     reranker_litellm_sdk_model: str
@@ -3480,6 +3548,7 @@ class HindsightConfig:
     db_pool_max_size: int
     db_command_timeout: int
     db_acquire_timeout: int
+    db_pool_slow_acquire_threshold_seconds: float
     db_statement_timeout: int
     db_max_parallel_workers_per_gather: int | None
     db_session_setup_on_acquire: bool
@@ -3795,6 +3864,12 @@ class HindsightConfig:
     }
 
     @property
+    def entity_trgm_probe_threshold(self) -> float:
+        """The pg_trgm threshold the entity probe actually runs at: never below the merge floor,
+        since a candidate under it can never be merged and would only cost work (#5367)."""
+        return max(self.entity_trgm_similarity_threshold, self.entity_merge_min_similarity)
+
+    @property
     def file_conversion_max_batch_size_bytes(self) -> int:
         """Get maximum total batch size in bytes."""
         return self.file_conversion_max_batch_size_mb * 1024 * 1024
@@ -3816,6 +3891,7 @@ class HindsightConfig:
         primary = RerankerMemberConfig(
             index=0,
             provider=self.reranker_provider,
+            max_tokens_per_candidate=self.reranker_max_tokens_per_candidate,
             local_model=self.reranker_local_model,
             local_force_cpu=self.reranker_local_force_cpu,
             local_max_concurrent=self.reranker_local_max_concurrent,
@@ -3851,7 +3927,6 @@ class HindsightConfig:
             litellm_api_base=self.reranker_litellm_api_base,
             litellm_api_key=self.reranker_litellm_api_key,
             litellm_model=self.reranker_litellm_model,
-            litellm_max_tokens_per_doc=self.reranker_litellm_max_tokens_per_doc,
             litellm_timeout=self.reranker_litellm_timeout,
             litellm_sdk_api_key=self.reranker_litellm_sdk_api_key,
             litellm_sdk_model=self.reranker_litellm_sdk_model,
@@ -4137,7 +4212,12 @@ class HindsightConfig:
 
         config = cls(
             # Database
-            database_backend=os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
+            # `.lower()` returns a plain `str`; the field declares the two backends it accepts,
+            # and an unknown value is rejected by that field rather than here.
+            database_backend=cast(
+                'Literal["postgresql", "oracle"]',
+                os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
+            ),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
             read_database_url=os.getenv(ENV_READ_DATABASE_URL) or None,
             read_db_pool_min_size=int(os.getenv(ENV_READ_DB_POOL_MIN_SIZE, str(DEFAULT_DB_POOL_MIN_SIZE))),
@@ -4211,6 +4291,9 @@ class HindsightConfig:
             llm_send_bank_as_user=os.getenv(ENV_LLM_SEND_BANK_AS_USER, str(DEFAULT_LLM_SEND_BANK_AS_USER)).lower()
             in ("true", "1"),
             llm_vision=_parse_tristate_bool(ENV_LLM_VISION, os.getenv(ENV_LLM_VISION)),
+            llm_openai_compatible_json_mode=_parse_tristate_bool(
+                ENV_LLM_OPENAI_COMPATIBLE_JSON_MODE, os.getenv(ENV_LLM_OPENAI_COMPATIBLE_JSON_MODE)
+            ),
             llm_ollama_num_ctx=_parse_optional_positive_int(
                 ENV_LLM_OLLAMA_NUM_CTX,
                 os.getenv(ENV_LLM_OLLAMA_NUM_CTX),
@@ -4254,61 +4337,34 @@ class HindsightConfig:
             # Per-operation LLM config (None = use default)
             retain_llm_provider=os.getenv(ENV_RETAIN_LLM_PROVIDER) or None,
             retain_llm_api_key=os.getenv(ENV_RETAIN_LLM_API_KEY) or None,
-            retain_llm_model=os.getenv(ENV_RETAIN_LLM_MODEL)
-            or (
-                _get_default_model_for_provider(os.getenv(ENV_RETAIN_LLM_PROVIDER))
-                if os.getenv(ENV_RETAIN_LLM_PROVIDER)
-                else None
-            ),
+            retain_llm_model=os.getenv(ENV_RETAIN_LLM_MODEL) or _env_default_model(ENV_RETAIN_LLM_PROVIDER),
             retain_llm_base_url=os.getenv(ENV_RETAIN_LLM_BASE_URL) or None,
             vlm_provider=os.getenv(ENV_VLM_PROVIDER) or None,
             vlm_api_key=os.getenv(ENV_VLM_API_KEY) or None,
-            vlm_model=os.getenv(ENV_VLM_MODEL)
-            or (_get_default_model_for_provider(os.getenv(ENV_VLM_PROVIDER)) if os.getenv(ENV_VLM_PROVIDER) else None),
+            vlm_model=os.getenv(ENV_VLM_MODEL) or _env_default_model(ENV_VLM_PROVIDER),
             vlm_base_url=os.getenv(ENV_VLM_BASE_URL) or None,
             fireworks_account_id=os.getenv(ENV_FIREWORKS_ACCOUNT_ID) or None,
             fireworks_batch_base_url=os.getenv(ENV_FIREWORKS_BATCH_BASE_URL) or DEFAULT_FIREWORKS_BATCH_BASE_URL,
             fireworks_batch_max_wait_seconds=int(
                 os.getenv(ENV_FIREWORKS_BATCH_MAX_WAIT_SECONDS, str(DEFAULT_FIREWORKS_BATCH_MAX_WAIT_SECONDS))
             ),
-            retain_llm_max_concurrent=int(os.getenv(ENV_RETAIN_LLM_MAX_CONCURRENT))
-            if os.getenv(ENV_RETAIN_LLM_MAX_CONCURRENT)
-            else None,
-            retain_llm_max_retries=int(os.getenv(ENV_RETAIN_LLM_MAX_RETRIES))
-            if os.getenv(ENV_RETAIN_LLM_MAX_RETRIES)
-            else None,
-            retain_llm_initial_backoff=float(os.getenv(ENV_RETAIN_LLM_INITIAL_BACKOFF))
-            if os.getenv(ENV_RETAIN_LLM_INITIAL_BACKOFF)
-            else None,
-            retain_llm_max_backoff=float(os.getenv(ENV_RETAIN_LLM_MAX_BACKOFF))
-            if os.getenv(ENV_RETAIN_LLM_MAX_BACKOFF)
-            else None,
-            retain_llm_timeout=float(os.getenv(ENV_RETAIN_LLM_TIMEOUT)) if os.getenv(ENV_RETAIN_LLM_TIMEOUT) else None,
+            retain_llm_max_concurrent=_env_int(ENV_RETAIN_LLM_MAX_CONCURRENT),
+            retain_llm_max_retries=_env_int(ENV_RETAIN_LLM_MAX_RETRIES),
+            retain_llm_initial_backoff=_env_float(ENV_RETAIN_LLM_INITIAL_BACKOFF),
+            retain_llm_max_backoff=_env_float(ENV_RETAIN_LLM_MAX_BACKOFF),
+            retain_llm_timeout=_env_float(ENV_RETAIN_LLM_TIMEOUT),
             retain_llm_litellmrouter_config=_parse_llm_router_config(ENV_RETAIN_LLM_LITELLMROUTER_CONFIG),
             retain_llm_reasoning_effort=os.getenv(ENV_RETAIN_LLM_REASONING_EFFORT) or None,
             retain_llm_extra_body=json.loads(os.getenv(ENV_RETAIN_LLM_EXTRA_BODY, "null")),
             retain_llm_cache_affinity=os.getenv(ENV_RETAIN_LLM_CACHE_AFFINITY) or None,
             reflect_llm_provider=os.getenv(ENV_REFLECT_LLM_PROVIDER) or None,
             reflect_llm_api_key=os.getenv(ENV_REFLECT_LLM_API_KEY) or None,
-            reflect_llm_model=os.getenv(ENV_REFLECT_LLM_MODEL)
-            or (
-                _get_default_model_for_provider(os.getenv(ENV_REFLECT_LLM_PROVIDER))
-                if os.getenv(ENV_REFLECT_LLM_PROVIDER)
-                else None
-            ),
+            reflect_llm_model=os.getenv(ENV_REFLECT_LLM_MODEL) or _env_default_model(ENV_REFLECT_LLM_PROVIDER),
             reflect_llm_base_url=os.getenv(ENV_REFLECT_LLM_BASE_URL) or None,
-            reflect_llm_max_concurrent=int(os.getenv(ENV_REFLECT_LLM_MAX_CONCURRENT))
-            if os.getenv(ENV_REFLECT_LLM_MAX_CONCURRENT)
-            else None,
-            reflect_llm_max_retries=int(os.getenv(ENV_REFLECT_LLM_MAX_RETRIES))
-            if os.getenv(ENV_REFLECT_LLM_MAX_RETRIES)
-            else None,
-            reflect_llm_initial_backoff=float(os.getenv(ENV_REFLECT_LLM_INITIAL_BACKOFF))
-            if os.getenv(ENV_REFLECT_LLM_INITIAL_BACKOFF)
-            else None,
-            reflect_llm_max_backoff=float(os.getenv(ENV_REFLECT_LLM_MAX_BACKOFF))
-            if os.getenv(ENV_REFLECT_LLM_MAX_BACKOFF)
-            else None,
+            reflect_llm_max_concurrent=_env_int(ENV_REFLECT_LLM_MAX_CONCURRENT),
+            reflect_llm_max_retries=_env_int(ENV_REFLECT_LLM_MAX_RETRIES),
+            reflect_llm_initial_backoff=_env_float(ENV_REFLECT_LLM_INITIAL_BACKOFF),
+            reflect_llm_max_backoff=_env_float(ENV_REFLECT_LLM_MAX_BACKOFF),
             reflect_llm_timeout=_resolve_reflect_llm_timeout(),
             reflect_llm_litellmrouter_config=_parse_llm_router_config(ENV_REFLECT_LLM_LITELLMROUTER_CONFIG),
             reflect_llm_reasoning_effort=os.getenv(ENV_REFLECT_LLM_REASONING_EFFORT) or None,
@@ -4317,27 +4373,13 @@ class HindsightConfig:
             consolidation_llm_provider=os.getenv(ENV_CONSOLIDATION_LLM_PROVIDER) or None,
             consolidation_llm_api_key=os.getenv(ENV_CONSOLIDATION_LLM_API_KEY) or None,
             consolidation_llm_model=os.getenv(ENV_CONSOLIDATION_LLM_MODEL)
-            or (
-                _get_default_model_for_provider(os.getenv(ENV_CONSOLIDATION_LLM_PROVIDER))
-                if os.getenv(ENV_CONSOLIDATION_LLM_PROVIDER)
-                else None
-            ),
+            or _env_default_model(ENV_CONSOLIDATION_LLM_PROVIDER),
             consolidation_llm_base_url=os.getenv(ENV_CONSOLIDATION_LLM_BASE_URL) or None,
-            consolidation_llm_max_concurrent=int(os.getenv(ENV_CONSOLIDATION_LLM_MAX_CONCURRENT))
-            if os.getenv(ENV_CONSOLIDATION_LLM_MAX_CONCURRENT)
-            else None,
-            consolidation_llm_max_retries=int(os.getenv(ENV_CONSOLIDATION_LLM_MAX_RETRIES))
-            if os.getenv(ENV_CONSOLIDATION_LLM_MAX_RETRIES)
-            else None,
-            consolidation_llm_initial_backoff=float(os.getenv(ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF))
-            if os.getenv(ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF)
-            else None,
-            consolidation_llm_max_backoff=float(os.getenv(ENV_CONSOLIDATION_LLM_MAX_BACKOFF))
-            if os.getenv(ENV_CONSOLIDATION_LLM_MAX_BACKOFF)
-            else None,
-            consolidation_llm_timeout=float(os.getenv(ENV_CONSOLIDATION_LLM_TIMEOUT))
-            if os.getenv(ENV_CONSOLIDATION_LLM_TIMEOUT)
-            else None,
+            consolidation_llm_max_concurrent=_env_int(ENV_CONSOLIDATION_LLM_MAX_CONCURRENT),
+            consolidation_llm_max_retries=_env_int(ENV_CONSOLIDATION_LLM_MAX_RETRIES),
+            consolidation_llm_initial_backoff=_env_float(ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF),
+            consolidation_llm_max_backoff=_env_float(ENV_CONSOLIDATION_LLM_MAX_BACKOFF),
+            consolidation_llm_timeout=_env_float(ENV_CONSOLIDATION_LLM_TIMEOUT),
             consolidation_llm_litellmrouter_config=_parse_llm_router_config(ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG),
             consolidation_llm_reasoning_effort=os.getenv(ENV_CONSOLIDATION_LLM_REASONING_EFFORT) or None,
             consolidation_llm_extra_body=json.loads(os.getenv(ENV_CONSOLIDATION_LLM_EXTRA_BODY, "null")),
@@ -4345,27 +4387,13 @@ class HindsightConfig:
             mental_model_refresh_llm_provider=os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_PROVIDER) or None,
             mental_model_refresh_llm_api_key=os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_API_KEY) or None,
             mental_model_refresh_llm_model=os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MODEL)
-            or (
-                _get_default_model_for_provider(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_PROVIDER))
-                if os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_PROVIDER)
-                else None
-            ),
+            or _env_default_model(ENV_MENTAL_MODEL_REFRESH_LLM_PROVIDER),
             mental_model_refresh_llm_base_url=os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_BASE_URL) or None,
-            mental_model_refresh_llm_max_concurrent=int(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT))
-            if os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT)
-            else None,
-            mental_model_refresh_llm_max_retries=int(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_RETRIES))
-            if os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_RETRIES)
-            else None,
-            mental_model_refresh_llm_initial_backoff=float(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_INITIAL_BACKOFF))
-            if os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_INITIAL_BACKOFF)
-            else None,
-            mental_model_refresh_llm_max_backoff=float(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_BACKOFF))
-            if os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_BACKOFF)
-            else None,
-            mental_model_refresh_llm_timeout=float(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_TIMEOUT))
-            if os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_TIMEOUT)
-            else None,
+            mental_model_refresh_llm_max_concurrent=_env_int(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT),
+            mental_model_refresh_llm_max_retries=_env_int(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_RETRIES),
+            mental_model_refresh_llm_initial_backoff=_env_float(ENV_MENTAL_MODEL_REFRESH_LLM_INITIAL_BACKOFF),
+            mental_model_refresh_llm_max_backoff=_env_float(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_BACKOFF),
+            mental_model_refresh_llm_timeout=_env_float(ENV_MENTAL_MODEL_REFRESH_LLM_TIMEOUT),
             mental_model_refresh_llm_litellmrouter_config=_parse_llm_router_config(
                 ENV_MENTAL_MODEL_REFRESH_LLM_LITELLMROUTER_CONFIG
             ),
@@ -4615,6 +4643,13 @@ class HindsightConfig:
             or os.getenv(ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY),
             # Reranker
             reranker_provider=os.getenv(ENV_RERANKER_PROVIDER, DEFAULT_RERANKER_PROVIDER),
+            # Generic name, falling back to the deprecated LiteLLM-specific alias.
+            reranker_max_tokens_per_candidate=int(v)
+            if (
+                v := os.getenv(ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE)
+                or os.getenv(ENV_RERANKER_LITELLM_MAX_TOKENS_PER_DOC)
+            )
+            else DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE,
             reranker_send_bank_as_header=os.getenv(
                 ENV_RERANKER_SEND_BANK_AS_HEADER,
                 str(DEFAULT_RERANKER_SEND_BANK_AS_HEADER),
@@ -4713,9 +4748,6 @@ class HindsightConfig:
             or os.getenv(ENV_LITELLM_API_BASE, DEFAULT_LITELLM_API_BASE),
             reranker_litellm_api_key=os.getenv(ENV_RERANKER_LITELLM_API_KEY) or os.getenv(ENV_LITELLM_API_KEY),
             reranker_litellm_model=os.getenv(ENV_RERANKER_LITELLM_MODEL, DEFAULT_RERANKER_LITELLM_MODEL),
-            reranker_litellm_max_tokens_per_doc=int(v)
-            if (v := os.getenv(ENV_RERANKER_LITELLM_MAX_TOKENS_PER_DOC))
-            else DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC,
             reranker_litellm_timeout=float(
                 os.getenv(ENV_RERANKER_LITELLM_TIMEOUT, str(DEFAULT_RERANKER_LITELLM_TIMEOUT))
             ),
@@ -4958,9 +4990,7 @@ class HindsightConfig:
             file_storage_azure_account_name=os.getenv(ENV_FILE_STORAGE_AZURE_ACCOUNT_NAME) or None,
             file_storage_azure_account_key=os.getenv(ENV_FILE_STORAGE_AZURE_ACCOUNT_KEY) or None,
             file_parser=_parse_str_list(os.getenv(ENV_FILE_PARSER, DEFAULT_FILE_PARSER)),
-            file_parser_allowlist=_parse_str_list(os.getenv(ENV_FILE_PARSER_ALLOWLIST))
-            if os.getenv(ENV_FILE_PARSER_ALLOWLIST)
-            else None,
+            file_parser_allowlist=_env_str_list(ENV_FILE_PARSER_ALLOWLIST),
             file_parser_markitdown_ocr_enabled=os.getenv(
                 ENV_FILE_PARSER_MARKITDOWN_OCR_ENABLED,
                 str(DEFAULT_FILE_PARSER_MARKITDOWN_OCR_ENABLED),
@@ -5068,9 +5098,7 @@ class HindsightConfig:
                 os.getenv(ENV_CONSOLIDATION_MAX_TOKENS, str(DEFAULT_CONSOLIDATION_MAX_TOKENS))
             ),
             consolidation_max_completion_tokens=(
-                int(os.getenv(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS))
-                if os.getenv(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS)
-                else DEFAULT_CONSOLIDATION_MAX_COMPLETION_TOKENS
+                _env_int_or(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS, DEFAULT_CONSOLIDATION_MAX_COMPLETION_TOKENS)
             ),
             consolidation_recall_budget=os.getenv(ENV_CONSOLIDATION_RECALL_BUDGET, DEFAULT_CONSOLIDATION_RECALL_BUDGET),
             consolidation_source_facts_max_tokens=int(
@@ -5105,6 +5133,11 @@ class HindsightConfig:
             db_pool_max_size=int(os.getenv(ENV_DB_POOL_MAX_SIZE, str(DEFAULT_DB_POOL_MAX_SIZE))),
             db_command_timeout=int(os.getenv(ENV_DB_COMMAND_TIMEOUT, str(DEFAULT_DB_COMMAND_TIMEOUT))),
             db_acquire_timeout=int(os.getenv(ENV_DB_ACQUIRE_TIMEOUT, str(DEFAULT_DB_ACQUIRE_TIMEOUT))),
+            db_pool_slow_acquire_threshold_seconds=float(
+                os.getenv(
+                    ENV_DB_POOL_SLOW_ACQUIRE_THRESHOLD_SECONDS, str(DEFAULT_DB_POOL_SLOW_ACQUIRE_THRESHOLD_SECONDS)
+                )
+            ),
             db_statement_timeout=int(os.getenv(ENV_DB_STATEMENT_TIMEOUT, str(DEFAULT_DB_STATEMENT_TIMEOUT))),
             db_max_parallel_workers_per_gather=_parse_optional_non_negative_int(
                 ENV_DB_MAX_PARALLEL_WORKERS_PER_GATHER,
@@ -5178,9 +5211,7 @@ class HindsightConfig:
             reflect_default_options=json.loads(os.getenv(ENV_REFLECT_DEFAULT_OPTIONS, "").strip() or "null")
             or DEFAULT_REFLECT_DEFAULT_OPTIONS,
             reflect_max_completion_tokens=(
-                int(os.getenv(ENV_REFLECT_MAX_COMPLETION_TOKENS))
-                if os.getenv(ENV_REFLECT_MAX_COMPLETION_TOKENS)
-                else DEFAULT_REFLECT_MAX_COMPLETION_TOKENS
+                _env_int_or(ENV_REFLECT_MAX_COMPLETION_TOKENS, DEFAULT_REFLECT_MAX_COMPLETION_TOKENS)
             ),
             enable_text_search=os.getenv(ENV_ENABLE_TEXT_SEARCH, str(DEFAULT_ENABLE_TEXT_SEARCH)).lower()
             in ("true", "1", "yes"),
@@ -5218,15 +5249,9 @@ class HindsightConfig:
             recall_budget_min=int(os.getenv(ENV_RECALL_BUDGET_MIN, str(DEFAULT_RECALL_BUDGET_MIN))),
             recall_budget_max=int(os.getenv(ENV_RECALL_BUDGET_MAX, str(DEFAULT_RECALL_BUDGET_MAX))),
             # Disposition settings (None = fall back to DB value)
-            disposition_skepticism=int(os.getenv(ENV_DISPOSITION_SKEPTICISM))
-            if os.getenv(ENV_DISPOSITION_SKEPTICISM)
-            else DEFAULT_DISPOSITION_SKEPTICISM,
-            disposition_literalism=int(os.getenv(ENV_DISPOSITION_LITERALISM))
-            if os.getenv(ENV_DISPOSITION_LITERALISM)
-            else DEFAULT_DISPOSITION_LITERALISM,
-            disposition_empathy=int(os.getenv(ENV_DISPOSITION_EMPATHY))
-            if os.getenv(ENV_DISPOSITION_EMPATHY)
-            else DEFAULT_DISPOSITION_EMPATHY,
+            disposition_skepticism=_env_int_or(ENV_DISPOSITION_SKEPTICISM, DEFAULT_DISPOSITION_SKEPTICISM),
+            disposition_literalism=_env_int_or(ENV_DISPOSITION_LITERALISM, DEFAULT_DISPOSITION_LITERALISM),
+            disposition_empathy=_env_int_or(ENV_DISPOSITION_EMPATHY, DEFAULT_DISPOSITION_EMPATHY),
             # OpenTelemetry tracing configuration
             otel_traces_enabled=os.getenv(ENV_OTEL_TRACES_ENABLED, str(DEFAULT_OTEL_TRACES_ENABLED)).lower()
             in ("true", "1", "yes"),
@@ -5450,6 +5475,21 @@ def _parse_migration_isolation() -> str:
             f"{ENV_MIGRATION_ISOLATION} must be one of {', '.join(MIGRATION_ISOLATION_CHOICES)}, got {raw!r}"
         )
     return raw
+
+
+#: What a function that reads only STATIC config fields accepts.
+#:
+#: ``get_config()`` hands back a :class:`StaticConfigProxy`, not a :class:`HindsightConfig` --
+#: the proxy forwards every static field to the model it wraps and raises on the bank-configurable
+#: ones, which is the whole point of it. They are still distinct types, so a parameter annotated as
+#: the model alone rejects what ``get_config()`` returns, and the callers that pass it through are
+#: correct code a nominal check reads as wrong. Annotate such a parameter with this instead of
+#: widening to ``Any``, which would give up the checking on every other field.
+#:
+#: A function that needs a BANK-resolved value takes ``HindsightConfig`` on its own: those come
+#: from ``ConfigResolver.resolve_full_config``, never from the proxy, and accepting the proxy there
+#: would be accepting an object that raises on the very field being read.
+ConfigLike = Union["HindsightConfig", "StaticConfigProxy"]
 
 
 def get_config() -> StaticConfigProxy:

@@ -8,13 +8,16 @@ describes is the contract, so the cases are unchanged and only the app under tes
 is now the real one.
 """
 
+import logging
+
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Query
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
 from hindsight_api.api.observability import HttpObservabilityMiddleware
 from hindsight_api.api.unknown_params import UnknownParamsRoute
+from hindsight_api.extensions.tenant import AuthenticationError
 
 
 class ItemRequest(BaseModel):
@@ -38,6 +41,13 @@ def _make_test_app() -> FastAPI:
     @app.get("/items")
     async def list_items(limit: int = 10, offset: int = 0):
         return {"items": [], "limit": limit, "offset": offset}
+
+    def _tag_filter(tags: list[str] | None = Query(None), tags_match: str = "any") -> str:
+        return f"{tags}:{tags_match}"
+
+    @app.get("/filtered")
+    async def filtered(tag_filter: str = Depends(_tag_filter)):
+        return {"filter": tag_filter}
 
     @app.get("/items/{item_id}")
     async def get_item(item_id: str, details: bool = False):
@@ -64,6 +74,12 @@ class TestUnknownQueryParams:
         resp = client.get("/items", params={"limit": 5, "offset": 0})
         assert resp.status_code == 200
         assert "X-Ignored-Params" not in resp.headers
+
+    def test_params_declared_by_a_dependency_are_known(self, client):
+        """A ``Depends()`` helper's query params are applied, so they are not "ignored"."""
+        resp = client.get("/filtered", params={"tags": ["a", "b"], "tags_match": "all", "nope": 1})
+        assert resp.json() == {"filter": "['a', 'b']:all"}
+        assert resp.headers["X-Ignored-Params"] == "nope"
 
     def test_unknown_query_param_sets_header(self, client):
         resp = client.get("/items", params={"limit": 5, "tag": "foo"})
@@ -186,6 +202,25 @@ class TestBankAliasRewrite:
         resp = client.get("/v1/default/banks/real-bank/thing")
         assert resp.status_code == 200
         assert resp.json()["bank_id"] == "real-bank"
+
+    def test_failures_warn_but_missing_auth_stays_quiet(self, caplog):
+        """A real failure is worth a warning. An unauthenticated request is not: it
+        happens on every such request, auth rejects it later anyway, and a warning
+        with a traceback each time drowns the logs."""
+
+        async def resolver(_request, bank_id: str) -> str:
+            if bank_id == "no-auth":
+                raise AuthenticationError("API key required")
+            raise RuntimeError("database is down")
+
+        client = TestClient(self._app(resolver))
+        with caplog.at_level(logging.DEBUG, logger="hindsight_api.api.unknown_params"):
+            assert client.get("/v1/default/banks/no-auth/thing").json()["bank_id"] == "no-auth"
+            assert client.get("/v1/default/banks/real-bank/thing").json()["bank_id"] == "real-bank"
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert [r.getMessage() for r in warnings] == ["Bank alias resolution failed for 'real-bank'; using it as-is"]
+        quiet = [r for r in caplog.records if "'no-auth'" in r.getMessage()]
+        assert [r.levelno for r in quiet] == [logging.DEBUG] and quiet[0].exc_info is None
 
     def test_no_resolver_configured_is_not_an_error(self):
         app = FastAPI()

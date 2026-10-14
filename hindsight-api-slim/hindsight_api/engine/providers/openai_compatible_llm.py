@@ -28,7 +28,7 @@ import time
 from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import aiohttp
@@ -221,9 +221,23 @@ def _strip_reasoning_tags(text: str) -> str:
     (e.g. a mental-model markdown blob from MiniMax-M3) leaks the raw
     ``<think>...</think>`` verbatim into stored memories.
 
-    Handles two cases:
-    1. Closed blocks: ``<think>...</think>`` removed wherever they appear.
-    2. Unclosed blocks: a dangling ``<think>`` with no closing tag (model output
+    Handles three cases:
+    1. Orphan close tag: ``reasoning</think>answer`` with no open tag. Chat
+       templates that prefill ``<think>`` into the generation prompt (Qwen3
+       thinking models, DeepSeek-R1-0528, Spark-X2.5) produce this whenever the
+       server runs without a reasoning parser, since the open tag was part of
+       the prompt rather than the completion. Everything up to the first close
+       tag is dropped, unless the response *starts* with ``{``, ``[`` or a code
+       fence -- there the close tag is a quoted literal, not a reasoning
+       boundary. The guard is deliberately that narrow: a stricter one (any
+       fence anywhere before the tag) would stop stripping the common case
+       where the reasoning itself drafts a fenced block. So a close tag quoted
+       inside an answer that opens with prose is still read as a boundary and
+       cuts the prose -- accepted, since it needs the model to talk about the
+       closing tag on its own, against leaking reasoning into every mental
+       model for this family of templates.
+    2. Closed blocks: ``<think>...</think>`` removed wherever they appear.
+    3. Unclosed blocks: a dangling ``<think>`` with no closing tag (model output
        truncated mid-thought) is removed to end-of-string, but only when it starts
        its own line (line-start, possibly indented). Inline occurrences (e.g. a
        JSON value quoting ``<think>`` verbatim) are real content and must be kept
@@ -238,7 +252,13 @@ def _strip_reasoning_tags(text: str) -> str:
     for open_tag, close_tag in _REASONING_TAG_PAIRS:
         open_re = re.escape(open_tag)
         close_re = re.escape(close_tag)
-        # Closed blocks first.
+        # Orphan close tag from a prefilled open tag (see case 1 above).
+        close_at = text.find(close_tag)
+        if close_at != -1:
+            head = text[:close_at]
+            if open_tag not in head and not head.lstrip().startswith(("{", "[", "```")):
+                text = text[close_at + len(close_tag) :]
+        # Closed blocks.
         text = re.sub(rf"{open_re}.*?{close_re}", "", text, flags=re.DOTALL)
         # Unclosed (truncated) blocks: strip only when the open tag starts its own
         # line, from there to end-of-string. The line-start anchor preserves inline
@@ -298,7 +318,7 @@ def _summarize_provider_error_payload(error: Any, max_len: int = 400) -> str:
 # and gateways this provider fronts. Losing the repair there is the cheaper mistake:
 # a JSONDecodeError is loud and the caller can split, while a silently short answer
 # is indistinguishable from a complete one. Same reasoning as #3827.
-_COMPLETED_FINISH_REASONS = frozenset({"stop", "tool_calls", "function_call", "end_turn"})
+COMPLETED_FINISH_REASONS = frozenset({"stop", "tool_calls", "function_call", "end_turn"})
 
 
 def _finish_reason_for_choice(choice: Any) -> Any:
@@ -340,6 +360,11 @@ def _first_choice_or_error(response: Any, *, provider: str, model: str, scope: s
             retryable=True,
         )
     return choices[0]
+
+
+def _is_openrouter(provider: str, base_url: str | None) -> bool:
+    """True for the openrouter provider and for openai pointed at an OpenRouter base URL."""
+    return provider == "openrouter" or urlparse(base_url or "").hostname == "openrouter.ai"
 
 
 def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -> tuple[str, Any]:
@@ -566,6 +591,19 @@ def _asks_for_reasoning_effort_none(e: APIStatusError) -> bool:
     # The remedy lives in the response body, not in the exception's own message.
     message = _summarize_status_error(e, body_max=1000)
     return "reasoning_effort" in message and "'none'" in message
+
+
+def _rejects_tool_choice(e: APIStatusError) -> bool:
+    """Whether the endpoint refused the request because of its ``tool_choice``.
+
+    The static lists above cover endpoints that always refuse a forced choice. Some
+    refuse it only in one mode, so no model name can tell: Alibaba's Qwen 3.8 host
+    (direct or through OpenRouter) answers "The tool_choice parameter does not
+    support being set to required or object in thinking mode", while vLLM and Groq
+    serve the same weights and accept it. Reflect forces its first retrieval call,
+    so without this every reflect against that host failed on its first request.
+    """
+    return e.status_code == 400 and "tool_choice" in _summarize_status_error(e, body_max=1000)
 
 
 def _parse_go_duration_seconds(text: str) -> float | None:
@@ -1256,15 +1294,18 @@ class OpenAICompatibleLLM(LLMInterface):
                         first_msg = call_params["messages"][0]
                         if isinstance(first_msg, dict) and isinstance(first_msg.get("content"), str):
                             first_msg["content"] = schema_msg + "\n\n" + first_msg["content"]
-                # Providers that skip json_object grammar enforcement
-                skip_grammar = self.provider in ("lmstudio", "ollama", "volcano")
-                if self.provider == "llamacpp":
-                    from hindsight_api.config import get_config
-
-                    skip_grammar = get_config().llamacpp_no_grammar
-                if not skip_grammar:
+                if self._supports_json_mode():
                     call_params["messages"] = _ensure_json_word_in_user_message(call_params["messages"])
                     call_params["response_format"] = {"type": "json_object"}
+
+        # OpenRouter load-balances one model across upstreams, and an upstream that
+        # does not support response_format may answer with empty content and
+        # finish_reason=stop instead of an error (#3494). require_parameters limits
+        # routing to upstreams that honour every parameter sent. Operator-set
+        # provider routing keys win; the provider dict is copied, not mutated.
+        if "response_format" in call_params and _is_openrouter(self.provider, self.base_url):
+            body = call_params.setdefault("extra_body", {})
+            body["provider"] = {"require_parameters": True, **body.get("provider", {})}
 
         apply_bank_attribution(call_params)
         # Cache pinning, alongside the other identity injection above and, like
@@ -1351,7 +1392,7 @@ class OpenAICompatibleLLM(LLMInterface):
                             # a provider that omits finish_reason would have a
                             # truncated body repaired into schema-valid partial
                             # data.
-                            if _finish_reason_for_choice(first_choice) not in _COMPLETED_FINISH_REASONS:
+                            if _finish_reason_for_choice(first_choice) not in COMPLETED_FINISH_REASONS:
                                 logger.error(
                                     f"JSON parse error after {attempt + 1} attempts and no "
                                     f"completion signal (finish_reason="
@@ -1519,6 +1560,25 @@ class OpenAICompatibleLLM(LLMInterface):
                                         output_tokens=0,
                                         success=True,
                                     )
+                                    # A recovered call is a successful one: the wrapper
+                                    # will not trace it, so record the span here (#5381).
+                                    try:
+                                        from hindsight_api.tracing import _serialize_for_span, get_span_recorder
+
+                                        get_span_recorder().record_llm_call(
+                                            provider=self.provider,
+                                            model=self.model,
+                                            scope=scope,
+                                            messages=messages,
+                                            response_content=_serialize_for_span(result),
+                                            input_tokens=0,
+                                            output_tokens=0,
+                                            duration=duration,
+                                            finish_reason=None,
+                                            error=None,
+                                        )
+                                    except Exception:
+                                        logger.debug("Span recording failed", exc_info=True)
                                     return LLMCallResult(
                                         content=result,
                                         usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
@@ -1832,6 +1892,17 @@ class OpenAICompatibleLLM(LLMInterface):
                     call_params["reasoning_effort"] = "none"
                     attempts_allowed += 1
                     continue
+                if "tool_choice" in call_params and _rejects_tool_choice(e):
+                    # Same downgrade as the static Meta/Z.AI branch above: a named
+                    # choice was already narrowed to its one tool, so "auto" keeps
+                    # the call practically forced.
+                    logger.warning(
+                        f"{self.provider}/{self.model} rejected tool_choice={call_params['tool_choice']!r}; "
+                        f"retrying with auto (scope={scope}): {_summarize_status_error(e)}"
+                    )
+                    del call_params["tool_choice"]
+                    attempts_allowed += 1
+                    continue
 
                 if attempt + 1 < attempts_allowed:
                     logger.warning(
@@ -2019,7 +2090,7 @@ class OpenAICompatibleLLM(LLMInterface):
                             # OpenAI-compatible path above, gated the same
                             # way: only a generation that reported reaching
                             # its own end gets structurally repaired.
-                            if result.get("done_reason") not in _COMPLETED_FINISH_REASONS:
+                            if result.get("done_reason") not in COMPLETED_FINISH_REASONS:
                                 logger.error(
                                     f"Ollama JSON parse error after {attempt + 1} attempts and no "
                                     f"completion signal (done_reason={result.get('done_reason')!r}); "
@@ -2130,6 +2201,18 @@ class OpenAICompatibleLLM(LLMInterface):
             raise last_exception
         raise RuntimeError("Ollama call failed after all retries")
 
+    def _supports_json_mode(self) -> bool:
+        """Whether to send ``json_object`` on the soft path, or the schema in the prompt only."""
+        from hindsight_api.config import get_config
+
+        config = get_config()
+        if config.llm_openai_compatible_json_mode is not None:
+            return config.llm_openai_compatible_json_mode
+        if self.provider == "llamacpp":
+            return not config.llamacpp_no_grammar
+        # These don't honour json_object reliably.
+        return self.provider not in ("lmstudio", "ollama", "volcano")
+
     def supports_vision(self) -> bool | None:
         """Known only for OpenAI itself; unknown for every other backend here.
 
@@ -2150,8 +2233,12 @@ class OpenAICompatibleLLM(LLMInterface):
     async def submit_batch(
         self,
         requests: list[dict[str, Any]],
-        endpoint: str = "/v1/chat/completions",
-        completion_window: str = "24h",
+        # The SDK's own literals: batch creation accepts exactly these, and a plain `str` here
+        # let a typo reach the API as a runtime error instead of failing at the call site.
+        endpoint: Literal["/v1/responses", "/v1/chat/completions", "/v1/embeddings", "/v1/completions"] = (
+            "/v1/chat/completions"
+        ),
+        completion_window: Literal["24h"] = "24h",
     ) -> dict[str, Any]:
         """
         Submit a batch of requests to OpenAI/Groq Batch API.

@@ -16,7 +16,7 @@ import time
 from contextlib import AbstractAsyncContextManager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 # Set exclusively by ConfiguredLLMProvider.call() / call_with_tools() via token-based
 # set/reset, so it is properly scoped to each individual LLM call and never leaks.
 _safety_settings_ctx: ContextVar[list | None] = ContextVar("gemini_safety_settings", default=None)
+
+# Google's documented placeholder for functionCall parts that never had a thought
+# signature (history transferred from another model, or injected by hand). Gemini 3
+# requires a signature on every functionCall part of the current turn.
+# https://ai.google.dev/gemini-api/docs/thought-signatures
+_SKIP_THOUGHT_SIGNATURE_VALIDATOR = b"skip_thought_signature_validator"
 
 
 # Vertex AI imports (optional)
@@ -228,6 +234,11 @@ def _convert_messages_to_gemini(msg_list: list[dict[str, Any]]) -> _GeminiConver
                     part_kwargs: dict[str, Any] = {"function_call": genai_types.FunctionCall(**fc_kwargs)}
                     if thought_signature:
                         part_kwargs["thought_signature"] = base64.b64decode(thought_signature)
+                    else:
+                        # Tool calls replayed from another provider (failover mid tool loop)
+                        # carry no signature, and Gemini 3 rejects the turn with HTTP 400.
+                        # Google documents this literal as the bypass for exactly that case.
+                        part_kwargs["thought_signature"] = _SKIP_THOUGHT_SIGNATURE_VALIDATOR
                     parts.append(genai_types.Part(**part_kwargs))
                 gemini_contents.append(genai_types.Content(role="model", parts=parts))
             else:
@@ -470,7 +481,8 @@ class GeminiLLM(LLMInterface):
                 gemini_contents.append(genai_types.Content(role="user", parts=_to_gemini_parts(content, genai_types)))
 
         def _system_instruction_with_schema() -> str:
-            schema = provider_json_schema(response_format)
+            # Only called when a response_format was supplied; the enclosing branch is the check.
+            schema = provider_json_schema(cast("type[BaseModel]", response_format))
             schema_msg = (
                 f"\n\nYou must respond with valid JSON matching this schema:\n"
                 f"{json.dumps(schema, indent=2, ensure_ascii=False)}"
@@ -544,7 +556,9 @@ class GeminiLLM(LLMInterface):
                     response = await asyncio.wait_for(
                         self._client.aio.models.generate_content(
                             model=self.model,
-                            contents=gemini_contents,
+                            # The SDK's union names the concrete part types; these are built with its
+                            # own `genai_types.Content` above.
+                            contents=cast("list", gemini_contents),
                             config=generation_config,
                         ),
                         timeout=self._request_timeout,
@@ -952,7 +966,7 @@ class GeminiLLM(LLMInterface):
                     response = await asyncio.wait_for(
                         self._client.aio.models.generate_content(
                             model=self.model,
-                            contents=active_contents,
+                            contents=cast("list", active_contents),
                             config=config,
                         ),
                         timeout=self._request_timeout,
@@ -978,7 +992,8 @@ class GeminiLLM(LLMInterface):
                                 tool_calls.append(
                                     LLMToolCall(
                                         id=f"gemini_{len(tool_calls)}",
-                                        name=fc.name,
+                                        # The SDK types the name optional; a function call always carries one.
+                                        name=cast(str, fc.name),
                                         arguments=dict(fc.args) if fc.args else {},
                                         thought_signature=thought_signature,
                                     )
@@ -1287,7 +1302,8 @@ class GeminiLLM(LLMInterface):
 
         batch = await self._client.aio.batches.create(
             model=self.model,
-            src=uploaded.name,
+            # `name` is set on every uploaded file the SDK returns.
+            src=cast(str, uploaded.name),
             config=genai_types.CreateBatchJobConfig(display_name="hindsight-batch"),
         )
 
@@ -1347,7 +1363,8 @@ class GeminiLLM(LLMInterface):
                 f"(submit_batch always uses file mode, so this is unexpected)"
             )
 
-        content = await self._client.aio.files.download(file=dest.file_name)
+        # `file_name` is set on every destination the file-mode branch above produces.
+        content = await self._client.aio.files.download(file=cast(str, dest.file_name))
         text = content.decode("utf-8") if isinstance(content, (bytes, bytearray)) else str(content)
 
         # The output is a JSONL error file plus results merged into one stream;

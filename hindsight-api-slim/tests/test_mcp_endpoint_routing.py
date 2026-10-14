@@ -10,7 +10,11 @@ from unittest.mock import patch
 import httpx
 import pytest
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client import streamable_http as sdk_http
+
+# Use the installed SDK transport; SDK 2 returns two streams and uses httpx2.
+httpx = getattr(sdk_http, "httpx2", httpx)
+streamable_http_client = sdk_http.streamable_http_client
 
 
 @pytest.mark.asyncio
@@ -28,7 +32,7 @@ async def test_mcp_endpoint_routing_integration(memory):
     # Use the app's lifespan context to properly initialize MCP servers
     async with app.router.lifespan_context(app):
         # Create an HTTPX client that routes to our ASGI app
-        from httpx import ASGITransport
+        ASGITransport = httpx.ASGITransport
 
         async with httpx.AsyncClient(
             transport=ASGITransport(app=app),
@@ -39,7 +43,7 @@ async def test_mcp_endpoint_routing_integration(memory):
             async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -70,7 +74,7 @@ async def test_mcp_endpoint_routing_integration(memory):
             async with streamable_http_client("http://test/mcp/test-bank/", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -107,7 +111,7 @@ async def test_mcp_no_trailing_slash_works(memory):
     app = create_app(memory, mcp_api_enabled=True, initialize_memory=False)
 
     async with app.router.lifespan_context(app):
-        from httpx import ASGITransport
+        ASGITransport = httpx.ASGITransport
 
         async with httpx.AsyncClient(
             transport=ASGITransport(app=app),
@@ -118,7 +122,7 @@ async def test_mcp_no_trailing_slash_works(memory):
             async with streamable_http_client("http://test/mcp", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -134,7 +138,7 @@ async def test_mcp_no_trailing_slash_works(memory):
             async with streamable_http_client("http://test/mcp/my-bank", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -152,7 +156,7 @@ async def test_mcp_tool_execution_through_client(memory):
     This verifies the full pipeline: HTTP → middleware → FastMCP → tool → engine → response.
     Previous tests only checked tool discovery (list_tools), not actual execution.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
 
@@ -167,7 +171,7 @@ async def test_mcp_tool_execution_through_client(memory):
             async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -191,7 +195,7 @@ async def test_mcp_mental_model_validation_through_client(memory):
     Verifies that invalid inputs return error messages without crashing,
     and that the engine is never called with invalid data.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
 
@@ -206,7 +210,7 @@ async def test_mcp_mental_model_validation_through_client(memory):
             async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -241,7 +245,7 @@ async def test_mcp_bank_named_sse_routes_to_single_bank(memory):
     or 'messages' from being accessed via path routing. They fell through to
     multi-bank mode instead.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
 
@@ -256,7 +260,7 @@ async def test_mcp_bank_named_sse_routes_to_single_bank(memory):
             async with streamable_http_client("http://test/mcp/sse/", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -281,7 +285,7 @@ async def test_mcp_bank_named_messages_routes_to_single_bank(memory):
 
     Same regression test as test_mcp_bank_named_sse_routes_to_single_bank but for 'messages'.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
 
@@ -296,7 +300,7 @@ async def test_mcp_bank_named_messages_routes_to_single_bank(memory):
             async with streamable_http_client("http://test/mcp/messages/", http_client=http_client) as (
                 read_stream,
                 write_stream,
-                _,
+                *_,
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
@@ -316,7 +320,7 @@ async def test_mcp_tool_execution_with_different_mcp_and_tenant_tokens(memory):
     with different values, tool calls should succeed because MCP transport auth
     already validated the token — the tenant extension should not re-validate.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
     from hindsight_api.extensions.builtin.tenant import ApiKeyTenantExtension
@@ -342,7 +346,7 @@ async def test_mcp_tool_execution_with_different_mcp_and_tenant_tokens(memory):
                 async with streamable_http_client("http://test/mcp/", http_client=http_client) as (
                     read_stream,
                     write_stream,
-                    _,
+                    *_,
                 ):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
@@ -368,7 +372,7 @@ async def test_mcp_rejects_wrong_mcp_token_even_if_matches_tenant_key(memory):
     When MCP_AUTH_TOKEN is set, the MCP middleware should validate against that token,
     not the tenant API key.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
     from hindsight_api.extensions.builtin.tenant import ApiKeyTenantExtension
@@ -411,7 +415,7 @@ async def test_mcp_unnamed_bank_is_rejected(memory):
     path or the header is now required; HINDSIGHT_MCP_BANK_ID remains available
     for a deployment that deliberately wants one fallback.
     """
-    from httpx import ASGITransport
+    ASGITransport = httpx.ASGITransport
 
     from hindsight_api.api import create_app
 
