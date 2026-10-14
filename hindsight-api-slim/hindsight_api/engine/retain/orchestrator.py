@@ -3753,7 +3753,10 @@ async def _try_delta_retain(
     # document's record in one read; that answers here when no text is wanted (the prefetch
     # deliberately carries no bodies, so an append still reads its own). Absent from the prefetch
     # means the document does not exist — an answer, not a miss to retry.
-    if document_prefetch is not None and full_document_body is None:
+    # A replacement can also be a strict extension of the stored source. Read
+    # that source before deciding whether changed chunk boundaries supersede
+    # any facts. Explicit appends already carry their base version below.
+    if document_prefetch is not None and full_document_body is None and append_base_hash is not None:
         # May be the in-flight read rather than its result -- see where it is started. Resolved
         # here, which is the first point that actually needs it.
         if isinstance(document_prefetch, asyncio.Task):
@@ -3770,7 +3773,7 @@ async def _try_delta_retain(
             fq_table=fq_table,
             bank_id=bank_id,
             document_id=effective_doc_id,
-            include_text=full_document_body is not None,
+            include_text=full_document_body is not None or append_base_hash is None,
         )
     doc_hash_at_load = state.content_hash
     original_text_at_load = state.original_text
@@ -3795,6 +3798,13 @@ async def _try_delta_retain(
     if any(c.content_hash is None for c in existing_chunks):
         logger.info(f"Delta retain skipped for {effective_doc_id}: existing chunks lack content_hash (pre-migration)")
         return None
+
+    preserve_historical_facts = append_base_hash is not None or _is_strict_append_of_stored_document(
+        original_text_at_load,
+        delta_full_body if delta_full_body is not None else "\n".join(c.get("content", "") for c in contents_dicts),
+    )
+    if preserve_historical_facts:
+        log_buffer.append("[delta] Source extension — preserving historical facts across changed chunk boundaries")
 
     # Chunk new content and classify changes.
     #
@@ -3858,8 +3868,9 @@ async def _try_delta_retain(
                 config=config,
                 expected_content_hash=doc_hash_at_load,
             )
-        logger.info(f"Delta retain: no unchanged chunks for {effective_doc_id}, falling back to full retain")
-        return None
+        if not preserve_historical_facts:
+            logger.info(f"Delta retain: no unchanged chunks for {effective_doc_id}, falling back to full retain")
+            return None
 
     chunks_to_process = changed_indices + new_indices
 
@@ -4111,13 +4122,22 @@ async def _try_delta_retain(
                 )
                 log_buffer.append(f"  Document metadata update in {time.time() - step_start:.3f}s")
 
-                # Delete changed and removed chunks (cascades to memory_units and links)
+                # A source extension cannot refute historical facts. Re-chunking
+                # an incrementally retained transcript changes boundaries even
+                # when every old byte survives; deleting those chunks cascades
+                # away facts, links and observations that re-extraction may not
+                # recreate. Upsert their text below while retaining the facts.
+                # Actual edits/removals still invalidate superseded chunks.
                 step_start = time.time()
-                chunks_to_delete = [
-                    existing_by_index[idx].chunk_id
-                    for idx in changed_indices + removed_indices
-                    if idx in existing_by_index
-                ]
+                chunks_to_delete = (
+                    []
+                    if preserve_historical_facts
+                    else [
+                        existing_by_index[idx].chunk_id
+                        for idx in changed_indices + removed_indices
+                        if idx in existing_by_index
+                    ]
+                )
                 invalidated_obs = await chunk_storage.delete_chunks_by_ids(
                     conn, chunks_to_delete, bank_id, ops=pool.ops
                 )
@@ -4128,9 +4148,8 @@ async def _try_delta_retain(
                     f"in {time.time() - step_start:.3f}s"
                 )
 
-                # Changed/removed units were deleted above. Sync unchanged
-                # survivors; new/changed units inserted below already carry
-                # the current metadata and tags.
+                # Sync surviving historical units; units inserted below already
+                # carry the current metadata and tags.
                 step_start = time.time()
                 updated_count = await fact_storage.update_memory_units_metadata_and_tags(
                     conn,
