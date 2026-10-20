@@ -1,5 +1,13 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createDshHooks, dshSessionEvents, toDshParameters, type Workspace } from "./dsh";
+import {
+  createDshHooks,
+  dshSessionEvents,
+  toolTemplateRoots,
+  toDshParameters,
+  type Workspace,
+} from "./dsh";
 import { readDshEvents } from "./core/transcript-dsh";
 import type { ToolSpec } from "./core/knowledge-tools";
 import { z } from "zod";
@@ -281,5 +289,26 @@ describe("toDshParameters", () => {
     expect(() => toDshParameters(spec({ limit: z.number().optional() as never }))).toThrow(
       /string parameters only/
     );
+  });
+});
+
+describe("toolTemplateRoots", () => {
+  it("tries the launch directory first, then every configured opt-in, expanding ~", () => {
+    expect(
+      toolTemplateRoots(
+        {
+          optInPaths: ["~/repo", "/abs/repo", "~/repo"],
+          mapPathToBank: { "~/mapped": "some-bank" },
+        },
+        "/launch"
+      )
+    ).toEqual(["/launch", join(homedir(), "repo"), "/abs/repo", join(homedir(), "mapped")]);
+  });
+
+  it("keeps the launch directory alone when nothing is configured", () => {
+    expect(toolTemplateRoots({}, "/launch")).toEqual(["/launch"]);
+    expect(toolTemplateRoots({ optInPaths: ["  "], mapPathToBank: {} }, "/launch")).toEqual([
+      "/launch",
+    ]);
   });
 });

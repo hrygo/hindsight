@@ -23,7 +23,9 @@
  * and no version to keep in step — any dsh whose event names still match can load this file.
  */
 import { randomUUID } from "node:crypto";
-import { resolveHostMemory } from "./core/host-client";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { resolveHostConfig, resolveHostMemory } from "./core/host-client";
 import { diag } from "./core/diag";
 import type { ToolSpec } from "./core/knowledge-tools";
 import { log } from "./core/log";
@@ -355,6 +357,40 @@ async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<s
   return text;
 }
 
+/** Candidate roots for the registry template, in order: the launch directory, then every
+ *  configured `optInPaths` / `mapPathToBank` entry (with `~` expanded), deduplicated.
+ *
+ *  Registration happens at plugin load, before any session exists, and its specs are static
+ *  (name/description/schema) — only `execute` needs a workspace, and it rebinds to the caller's.
+ *  So ANY opted-in workspace can seed the registry. Requiring the LAUNCH directory to be a project
+ *  is what made dsh Desktop expose no tools at all: its host process runs from
+ *  `$DSH_HOME/profiles/<name>`, which is never one of the repos it serves. */
+export function toolTemplateRoots(
+  cfg: { optInPaths?: string[]; mapPathToBank?: Record<string, string> },
+  fallbackRoot: string
+): string[] {
+  const expand = (dir: string): string =>
+    dir === "~" || dir.startsWith("~/") ? join(homedir(), dir.slice(1)) : dir;
+  const candidates = [
+    fallbackRoot,
+    ...(cfg.optInPaths ?? []),
+    ...Object.keys(cfg.mapPathToBank ?? {}),
+  ]
+    .filter((dir): dir is string => Boolean(dir && dir.trim()))
+    .map(expand);
+  return [...new Set(candidates)];
+}
+
+/** The workspace whose specs seed the registry: the first candidate memory is actually on for. */
+function toolTemplate(fallbackRoot: string): Workspace | undefined {
+  const { cfg } = resolveHostConfig(HARNESS, fallbackRoot);
+  for (const root of toolTemplateRoots(cfg, fallbackRoot)) {
+    const workspace = workspaceFor(root);
+    if (workspace) return workspace;
+  }
+  return undefined;
+}
+
 /**
  * Register the hindsight_* suite on `ctx.tools`.
  *
@@ -364,11 +400,10 @@ async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<s
  */
 function registerTools(toolCtx: DshToolContext, fallbackRoot: string): void {
   // The registry is populated at plugin load, before any session exists, so the NAMES and schemas
-  // come from the launch directory's workspace and each call rebinds to its own caller's bank. The
-  // one consequence: if memory is off for the launch directory specifically (a `banks.<id>`
-  // opt-out) the tools are absent even for other repositories this process later serves.
-  const template = workspaceFor(fallbackRoot);
-  if (!template) return; // memory disabled where this process was launched
+  // come from one workspace and each call rebinds to its own caller's bank. That template falls
+  // back past the launch directory when it is not itself a project (see toolTemplateRoots).
+  const template = toolTemplate(fallbackRoot);
+  if (!template) return; // memory is off for every root this process can see
   for (const spec of specsOf(template)) {
     toolCtx.tools.register({
       name: spec.name,
