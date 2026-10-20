@@ -707,8 +707,9 @@ describe("HindsightClient.reflect failures", () => {
     // Node 26.11 exposes a Dispatcher1Wrapper here, whose constructor takes a
     // dispatcher, not Agent options. Compose a real short default instead, while
     // allowing the client's explicit zero timeout to override that default.
-    g[key] = original.compose((dispatch) => (opts, handler) =>
-      dispatch({ ...opts, headersTimeout: opts.headersTimeout === 0 ? 0 : 100 }, handler)
+    g[key] = original.compose(
+      (dispatch) => (opts, handler) =>
+        dispatch({ ...opts, headersTimeout: opts.headersTimeout === 0 ? 0 : 100 }, handler)
     );
     try {
       // Newer Node fetch uses a newer global-dispatcher slot; select this

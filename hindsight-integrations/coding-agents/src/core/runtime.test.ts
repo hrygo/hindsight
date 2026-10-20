@@ -50,8 +50,9 @@ describe("RuntimeCore", () => {
     expect(skillSpy.mock.calls[0][1]).toMatchObject({ install: true });
 
     skillSpy.mockClear();
-    await new RuntimeCore(client, "bank-1", resolveConfig({ companionSkill: "never" }))
-      .seedIfCold(undefined);
+    await new RuntimeCore(client, "bank-1", resolveConfig({ companionSkill: "never" })).seedIfCold(
+      undefined
+    );
     expect(skillSpy).not.toHaveBeenCalled();
   });
 
